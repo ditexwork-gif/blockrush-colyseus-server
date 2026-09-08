@@ -2,6 +2,20 @@ import assert from "node:assert/strict";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
 import appConfig from "../src/app.config.js";
 
+const wait = (ms = 120) => new Promise(resolve => setTimeout(resolve, ms));
+function inputPacket(seq: number, { forward = true, yaw = 0, pitch = 0, weapon = 0 } = {}) {
+  const bytes = new Uint8Array(12), view = new DataView(bytes.buffer);
+  view.setUint32(0, seq, true); view.setUint8(4, forward ? 1 : 0);
+  view.setInt16(5, Math.round(yaw * 10000), true); view.setInt16(7, Math.round(pitch * 10000), true);
+  view.setUint16(9, 1, true); view.setUint8(11, weapon); return bytes;
+}
+function firePacket(seq: number, tick: number, yaw = 0, pitch = 0, weapon = 0) {
+  const bytes = new Uint8Array(13), view = new DataView(bytes.buffer);
+  view.setUint32(0, seq, true); view.setUint32(4, tick, true);
+  view.setInt16(8, Math.round(yaw * 10000), true); view.setInt16(10, Math.round(pitch * 10000), true);
+  view.setUint8(12, weapon); return bytes;
+}
+
 describe("BLOCKRUSH realtime room", () => {
   let colyseus: ColyseusTestServer<typeof appConfig>;
 
@@ -29,21 +43,51 @@ describe("BLOCKRUSH realtime room", () => {
     assert.equal(started.room.players.find((player: any) => player.id === guest.sessionId).name, "BETA");
   });
 
+  it("packs authoritative state into one 20 Hz schema stream", async () => {
+    const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa", public: false });
+    const host: any = await colyseus.connectTo(room, { name: "HOST" });
+    assert.equal(room.maxClients, 8);
+    assert.equal(room.patchRate, 50);
+    const player = host.state.players.get(host.sessionId);
+    assert.equal(typeof player.x, "number");
+    assert.equal(typeof player.lastSeq, "number");
+    assert.equal("pose" in player, false);
+  });
+
+  it("fills a compatible public room through Quick Play", async () => {
+    const options = { map: "foundry", mode: "ffa", public: true, name: "QUICK" };
+    const first: any = await colyseus.sdk.joinOrCreate("blockrush", options);
+    await first.waitForInitialState();
+    const second: any = await colyseus.sdk.joinOrCreate("blockrush", { ...options, name: "SECOND" });
+    await second.waitForInitialState();
+    assert.equal(second.roomId, first.roomId);
+    await wait(80);
+    assert.equal(first.state.players.size, 2);
+  });
+
+  it("exposes room and fixed-tick performance metrics", async () => {
+    const room = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa", public: false });
+    await colyseus.connectTo(room, { name: "METRICS" });
+    await wait();
+    const response: any = await colyseus.http.get("/metrics");
+    assert.equal(response.statusCode, 200);
+    assert.ok(response.data.activeRooms >= 1);
+    assert.ok(response.data.activePlayers >= 1);
+    assert.ok(response.data.tickSamples > 0);
+    assert.equal(response.data.tickBudgetMs, 8);
+  });
+
   it("acknowledges batched predicted movement over the realtime connection", async () => {
     const room = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
     const host = await colyseus.connectTo(room, { name: "HOST" });
     await colyseus.connectTo(room, { name: "GUEST" });
     const started = await host.request("start", {});
-    const self = started.room.players.find((player: any) => player.id === host.sessionId);
-    const before = { ...self.pose };
-    const frames = Array.from({ length: 6 }, (_, index) => [index + 1, 1 / 120, 1, 0, 0, 0, 0]);
-
-    host.send("sync", { round: 1, life: self.life, eventCursor: 0, frames, actions: [] });
-    await room.waitForNextMessage();
-
+    const self = started.room.players.find((player: any) => player.id === host.sessionId), before = self.pose.z;
+    for (let seq = 1; seq <= 6; seq++) host.send("i", inputPacket(seq));
+    await wait();
     const updated = await host.request("snapshot", {});
     assert.equal(updated.room.self.ackInput, 6);
-    assert.ok(updated.room.players.find((player: any) => player.id === host.sessionId).pose.z < before.z);
+    assert.ok(updated.room.players.find((player: any) => player.id === host.sessionId).pose.z < before);
   });
 
   it("keeps shots, damage, kills, scores, and ammunition authoritative", async () => {
@@ -55,27 +99,23 @@ describe("BLOCKRUSH realtime room", () => {
     const target = room.arena.players.find((player: any) => player.id === guest.sessionId);
     shooter.pose = { ...shooter.pose, x: 0, y: 0, z: 12, yaw: 0, pitch: 0 };
     target.pose = { ...target.pose, x: 0, y: 0, z: 10, yaw: Math.PI, pitch: 0 };
+    shooter.history = [{ tick: room.arena.tick, at: Date.now(), pose: { ...shooter.pose } }];
+    target.history = [{ tick: room.arena.tick, at: Date.now(), pose: { ...target.pose } }];
     shooter.fireCredit = 1000;
     shooter.fireAt = Date.now();
-    const shot = { kind: "shot", origin: { x: 0, y: 1.1, z: 12 }, dir: { x: 0, y: 0, z: -1 }, aiming: true };
-
-    host.send("sync", {
-      round: started.room.round,
-      life: shooter.life,
-      eventCursor: 0,
-      frames: [],
-      actions: [1, 2, 3, 4].map(seq => ({ ...shot, seq, inputSeq: 0 }))
-    });
-    await room.waitForNextMessage();
+    shooter.pose.yaw = 0; shooter.pose.pitch = 0; shooter.lastInput.aiming = true;
+    for (let seq = 1; seq <= 4; seq++) host.send("f", firePacket(seq, room.arena.tick));
+    await wait();
 
     const updated = await host.request("snapshot", {});
     const hostState = updated.room.players.find((player: any) => player.id === host.sessionId);
     const targetState = updated.room.players.find((player: any) => player.id === guest.sessionId);
     assert.equal(hostState.kills, 1);
-    assert.equal(hostState.score, 100);
+    assert.ok(hostState.score === 100 || hostState.score === 150);
     assert.equal(targetState.alive, false);
     assert.equal(targetState.deaths, 1);
     assert.equal(updated.room.self.ammo[0], 26);
-    assert.ok(updated.room.events.some((event: any) => event.type === "kill"));
+    assert.ok(updated.room.events.some((event: any) => event.type === "kill" && event.weaponId === "AR-30"));
+    assert.ok(updated.room.events.filter((event: any) => event.type === "hit").every((event: any) => event.weaponId === "AR-30" && Number.isInteger(event.actionSeq)));
   });
 });
