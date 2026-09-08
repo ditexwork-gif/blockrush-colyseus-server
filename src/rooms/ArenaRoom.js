@@ -1,6 +1,8 @@
 import { Room } from "colyseus";
 import { ARENA_SOLIDS, DEPOT_SOLIDS, simulateMovement } from "../shared/movement.js";
 import { byId, damageAtRange } from "../shared/weapons.js";
+import { inputMessage, playerJoined, playerLeft, recordTick, roomCreated, roomDisposed } from "../metrics.js";
+import { ArenaState, NetEvent, PlayerNetState } from "./schema.js";
 
 const LEGACY_GUNS = ["AR-30", "SR-6", "SMG-40"].map(serverWeapon);
 const SPAWNS = {
@@ -11,7 +13,9 @@ const WALLS = { foundry: ARENA_SOLIDS, depot: DEPOT_SOLIDS };
 const ROOM_IDS = "$blockrush-room-ids";
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MATCH_MS = 180_000;
-const TICK_MS = 1000 / 30;
+const TICK_RATE = 60;
+const TICK_MS = 1000 / TICK_RATE;
+const TICK = 1 / TICK_RATE;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 function serverWeapon(id) {
@@ -64,7 +68,7 @@ function spawn(arena, player, now) {
   player.ackInput = Number.isSafeInteger(player.ackInput) ? player.ackInput : 0;
   player.lastInputAt = now;
   player.inputCredit = 50;
-  player.history = [{ at: now, pose: { ...player.pose } }];
+  player.history = [{ at: now, tick: arena.tick || 0, pose: { ...player.pose } }];
 }
 
 function makePlayer(arena, id, name, now) {
@@ -84,12 +88,23 @@ function makePlayer(arena, id, name, now) {
     gunStage: 0,
     sniperKills: 0
   };
+  player.pendingInputs = [];
+  player.pendingFires = [];
+  player.lastInput = { fwd: 0, right: 0, jump: false, slidePressed: false, sprint: false, aiming: false, yaw: 0, pitch: 0 };
+  player.inputTicks = 3;
+  player.inputWindowAt = now;
+  player.inputCount = 0;
+  player.actionWindowAt = now;
+  player.actionCount = 0;
+  player.strikes = 0;
+  player.rtt = 0;
+  player.pingNonce = 0;
+  player.pingSentAt = 0;
   spawn(arena, player, now);
   return player;
 }
 
 function tick(arena, now) {
-  const dt = clamp((now - arena.tickAt) / 1000, 0, 1);
   arena.tickAt = now;
   if (!arena.players.some(player => player.id === arena.hostId)) arena.hostId = arena.players[0]?.id || null;
   if (arena.phase === "playing") tickProjectiles(arena, now);
@@ -100,7 +115,7 @@ function tick(arena, now) {
       player.ammo[player.reloadWeapon] = gunsFor(player)[player.reloadWeapon].cap;
       player.reloadEnd = 0;
     }
-    if (player.alive && now - player.lastDamage > 5000) player.hp = Math.min(100, player.hp + 12 * dt);
+    if (player.alive && now - player.lastDamage > 5000) player.hp = Math.min(100, player.hp + 12 * TICK);
   }
 }
 
@@ -160,38 +175,41 @@ function rayBox(origin, direction, min, max) {
   return near;
 }
 
-function historicalPose(player, at) {
+function historicalPoseAtTick(player, at) {
   const history = player.history || [];
   if (!history.length) return player.pose;
-  let before = history[0];
-  let after = history.at(-1);
-  for (let i = 1; i < history.length; i++) {
-    if (history[i].at >= at) {
-      before = history[i - 1];
-      after = history[i];
-      break;
-    }
+  let closest = history[0];
+  for (const sample of history) {
+    if (sample.tick > at) break;
+    closest = sample;
   }
-  if (at <= before.at) return before.pose;
-  if (at >= after.at) return player.pose;
-  const amount = (at - before.at) / (after.at - before.at || 1);
-  const a = before.pose;
-  const b = after.pose;
-  return {
-    ...b,
-    x: a.x + (b.x - a.x) * amount,
-    y: a.y + (b.y - a.y) * amount,
-    z: a.z + (b.z - a.z) * amount,
-    slide: (Number(a.slide) || 0) + ((Number(b.slide) || 0) - (Number(a.slide) || 0)) * amount
-  };
+  return closest.pose;
+}
+
+function seededUnit(seed) {
+  let value = (seed >>> 0) + 0x6d2b79f5;
+  value = Math.imul(value ^ value >>> 15, value | 1);
+  value ^= value + Math.imul(value ^ value >>> 7, value | 61);
+  return ((value ^ value >>> 14) >>> 0) / 4294967296;
+}
+
+function angleDelta(a, b) {
+  return Math.atan2(Math.sin(a - b), Math.cos(a - b));
+}
+
+function aimDirection(yaw, pitch) {
+  const cp = Math.cos(pitch);
+  return { x: -Math.sin(yaw) * cp, y: Math.sin(pitch), z: -Math.cos(yaw) * cp };
 }
 
 function damagePlayer(arena, player, target, damage, head, now, action = {}, end = target.pose) {
   if (!target.alive) return;
+  const weaponId = action.weaponId || gunsFor(player)[player.weapon].id;
   target.hp = Math.max(0, target.hp - damage);
   target.lastDamage = now;
   addEvent(arena, {
     type: "hit",
+    weaponId,
     player: player.id,
     target: target.id,
     head,
@@ -219,6 +237,7 @@ function damagePlayer(arena, player, target, damage, head, now, action = {}, end
   }
   addEvent(arena, {
     type: "kill",
+    weaponId,
     player: player.id,
     target: target.id,
     killer: player.name,
@@ -244,15 +263,16 @@ function worldDistance(arena, origin, direction, maxDistance = 220) {
 
 function shoot(arena, player, action, now) {
   const weapon = gunsFor(player)[player.weapon];
-  if (!player.alive || player.reloadEnd || now < (player.swapUntil || 0) || player.ammo[player.weapon] <= 0 || !action.dir || !action.origin) return;
-  const origin = action.origin;
-  const direction = action.dir;
-  const sourcePose = Number.isSafeInteger(action.inputSeq)
-    ? (player.history?.findLast(item => item.seq <= action.inputSeq)?.pose || player.pose)
-    : player.pose;
-  if (!["x", "y", "z"].every(key => Number.isFinite(origin[key]) && Number.isFinite(direction[key]))) return;
-  const length = Math.hypot(direction.x, direction.y, direction.z);
-  if (length < 0.9 || length > 1.1 || Math.hypot(origin.x - sourcePose.x, origin.z - sourcePose.z) > 3 || Math.abs(origin.y - (sourcePose.y + 1.5)) > 1) return;
+  action = {...action, weaponId: weapon.id};
+  if (!player.alive || player.reloadEnd || now < (player.swapUntil || 0) || player.ammo[player.weapon] <= 0) return;
+  const yaw = Number(action.yaw), pitch = Number(action.pitch);
+  if (!Number.isFinite(yaw) || !Number.isFinite(pitch) || Math.abs(angleDelta(yaw, player.pose.yaw)) > Math.PI / 12 || Math.abs(pitch - player.pose.pitch) > Math.PI / 12) {
+    player.strikes++;
+    return;
+  }
+  const origin = { x: player.pose.x, y: player.pose.y + (player.pose.slide ? 1 : 1.62), z: player.pose.z };
+  const direction = aimDirection(yaw, pitch);
+  const length = 1;
   const delay = weapon.burst && player.burstLeft > 0 ? weapon.burstDelay * 1000 : weapon.delay;
   player.fireCredit = Math.min(Math.max(1000, delay), player.fireCredit + Math.max(0, now - player.fireAt));
   player.fireAt = now;
@@ -263,10 +283,11 @@ function shoot(arena, player, action, now) {
   const power = weapon.charge ? (player.chargeAt !== null && now - player.chargeAt >= weapon.charge * 1000 ? 1 : 0.4) : 1;
   player.chargeAt = null;
   const normalized = { x: direction.x / length, y: direction.y / length, z: direction.z / length };
-  const rewindAt = clamp(Number(action.viewTime) || now, now - 1000, now);
+  const rewindTick = clamp(Number(action.tick) || arena.tick, arena.tick - 60, arena.tick);
   if (weapon.projectile) {
     arena.projectiles.push({
       owner: player.id,
+      actionSeq: action.seq,
       id: weapon.id,
       pos: { ...origin },
       vel: {
@@ -290,9 +311,9 @@ function shoot(arena, player, action, now) {
   for (let pellet = 0; pellet < weapon.pellets; pellet++) {
     const spread = action.aiming ? (weapon.cls === "SNIPER" ? 0.0003 : weapon.spread * 0.2) : weapon.spread;
     const ray = {
-      x: normalized.x + (Math.random() - 0.5) * spread,
-      y: normalized.y + (Math.random() - 0.5) * spread,
-      z: normalized.z + (Math.random() - 0.5) * spread
+      x: normalized.x + (seededUnit(action.seq * 17 + pellet * 3) - 0.5) * spread,
+      y: normalized.y + (seededUnit(action.seq * 17 + pellet * 3 + 1) - 0.5) * spread,
+      z: normalized.z + (seededUnit(action.seq * 17 + pellet * 3 + 2) - 0.5) * spread
     };
     const rayLength = Math.hypot(ray.x, ray.y, ray.z);
     for (const key of ["x", "y", "z"]) ray[key] /= rayLength;
@@ -300,7 +321,7 @@ function shoot(arena, player, action, now) {
     let targets = [];
     for (const target of arena.players) {
       if (target.id === player.id || !target.alive || (arena.mode === "tdm" && target.team === player.team)) continue;
-      const pose = historicalPose(target, rewindAt);
+      const pose = historicalPoseAtTick(target, rewindTick);
       const height = pose.slide ? 1.2 : 1.9;
       const hit = rayBox(origin, ray,
         { x: pose.x - 0.45, y: pose.y, z: pose.z - 0.45 },
@@ -362,72 +383,12 @@ function tickProjectiles(arena, now) {
       const distance = Math.hypot(target.pose.x - projectile.pos.x, target.pose.y + 1.5 - projectile.pos.y, target.pose.z - projectile.pos.z);
       const damage = weapon.damage * Math.max(0, 1 - distance / weapon.projectile.radius) * (target.id === player.id ? 0.5 : 1);
       if (damage > 0) {
-        damagePlayer(arena, player, target, damage, false, now);
+        damagePlayer(arena, player, target, damage, false, now, {seq: projectile.actionSeq, weaponId: projectile.id});
         if (target.id === player.id) target.pose.vy = (Number(target.pose.vy) || 0) + damage * 0.24;
       }
     }
     return false;
   });
-}
-
-function decodeFrames(body) {
-  if (!Array.isArray(body?.frames)) return [];
-  return body.frames.slice(0, 240)
-    .filter(frame => Array.isArray(frame) && frame.length === 7)
-    .map(frame => ({
-      seq: frame[0],
-      dt: frame[1],
-      fwd: frame[2],
-      right: frame[3],
-      jump: !!(frame[4] & 1),
-      slidePressed: !!(frame[4] & 2),
-      sprint: !!(frame[4] & 4),
-      aiming: !!(frame[4] & 8),
-      yaw: frame[5],
-      pitch: frame[6]
-    }));
-}
-
-function applyInputs(arena, player, rawInputs, now) {
-  if (!player.alive || !rawInputs.length) return;
-  const elapsed = Math.max(0, now - player.lastInputAt);
-  const inputs = rawInputs.filter(input => input && Number.isSafeInteger(input.seq) && input.seq > player.ackInput);
-  player.lastInputAt = now;
-  player.inputCredit = Math.min(1000, (Number(player.inputCredit) || 0) + elapsed);
-  const validDuration = input => {
-    const dt = Number(input?.dt);
-    return Number.isFinite(dt) && dt > 0 && dt <= 0.05 ? dt : 0;
-  };
-  let timeline = now - Math.min(1000, inputs.reduce((sum, input) => sum + validDuration(input) * 1000, 0));
-  for (const input of inputs) {
-    if (input.seq <= player.ackInput) continue;
-    player.ackInput = input.seq;
-    const dt = validDuration(input);
-    const cost = dt * 1000;
-    if (!dt || cost > player.inputCredit + 0.001) continue;
-    player.inputCredit = Math.max(0, player.inputCredit - cost);
-    const clean = {
-      fwd: clamp(Number(input.fwd) || 0, -1, 1),
-      right: clamp(Number(input.right) || 0, -1, 1),
-      jump: !!input.jump,
-      slidePressed: !!input.slidePressed,
-      sprint: !!input.sprint,
-      aiming: !!input.aiming,
-      yaw: Number.isFinite(input.yaw) ? input.yaw : 0,
-      speed: gunsFor(player)[player.weapon].speed,
-      map: arena.map
-    };
-    player.pose = simulateMovement(player.pose, clean, dt);
-    player.pose.yaw = clean.yaw % (Math.PI * 2);
-    player.pose.pitch = clamp(Number(input.pitch) || 0, -1.45, 1.45);
-    timeline += cost;
-    const { x, y, z, slide, yaw } = player.pose;
-    if (timeline - (player.history.at(-1)?.at || 0) >= 20 || input === inputs.at(-1)) {
-      player.history.push({ at: timeline, seq: input.seq, pose: { x, y, z, slide, yaw } });
-    }
-  }
-  player.poseAt = now;
-  player.history = player.history.filter(item => item.at >= now - 1000).slice(-80);
 }
 
 function applyActions(arena, player, body, now) {
@@ -453,22 +414,21 @@ function applyActions(arena, player, body, now) {
     } else if (action.kind === "reload" && player.alive && !player.reloadEnd && player.ammo[player.weapon] < gunsFor(player)[player.weapon].cap) {
       player.reloadWeapon = player.weapon;
       player.reloadEnd = now + gunsFor(player)[player.weapon].reload;
-    } else if (action.kind === "shot") {
-      shoot(arena, player, action, now);
     }
   }
 }
 
 export class ArenaRoom extends Room {
-  maxClients = 6;
-  maxMessagesPerSecond = 90;
+  maxClients = 8;
   arena = null;
 
   messages = {
-    sync: (client, body) => this.handleSync(client, body),
+    i: (client, body) => this.queueInput(client, body),
+    f: (client, body) => this.queueFire(client, body),
+    a: (client, body) => this.handleAction(client, body),
+    pong: (client, nonce) => this.handlePong(client, nonce),
     start: client => this.startMatch(client),
     snapshot: client => ({ room: this.snapshotFor(client) }),
-    ping: (_client, body) => ({ sentAt: Number(body?.sentAt) || 0, serverTime: Date.now() })
   };
 
   async onCreate(options) {
@@ -476,7 +436,8 @@ export class ArenaRoom extends Room {
     const now = Date.now();
     const map = ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
     const mode = ["ffa", "tdm", "gun"].includes(options?.mode) ? options.mode : "ffa";
-    this.metadata = { map, mode };
+    const publicRoom = options?.public === true;
+    this.metadata = { map, mode, public: publicRoom };
     this.arena = {
       code: this.roomId,
       map,
@@ -492,20 +453,32 @@ export class ArenaRoom extends Room {
       eventSeq: 0,
       projectiles: []
     };
-    this.setTimestep(() => this.step(), TICK_MS);
+    this.arena.tick = 0;
+    this.schemaEventSeq = 0;
+    this.emptyTimer = null;
+    this.autoDispose = false;
+    const state = new ArenaState();
+    state.code = this.roomId; state.map = map; state.mode = mode; state.serverTime = now;
+    this.setState(state);
+    this.setPatchRate(50);
+    this.setSimulationInterval(() => this.step(), TICK_MS);
+    roomCreated();
   }
 
   onJoin(client, options) {
+    clearTimeout(this.emptyTimer);
     const now = Date.now();
     const player = makePlayer(this.arena, client.sessionId, options?.name, now);
     this.arena.players.push(player);
     if (!this.arena.hostId) this.arena.hostId = player.id;
     this.arena.revision++;
-    this.sendSnapshots();
+    this.state.players.set(player.id, new PlayerNetState());
+    playerJoined();
+    this.syncState(now);
   }
 
   onDrop(client) {
-    this.allowReconnection(client, 15).catch(() => {});
+    this.allowReconnection(client, 20).catch(() => {});
   }
 
   onReconnect(client) {
@@ -514,17 +487,22 @@ export class ArenaRoom extends Room {
       player.lastInputAt = Date.now();
       player.inputCredit = 50;
     }
-    this.sendSnapshot(client);
+    this.syncState(Date.now());
   }
 
   onLeave(client) {
     this.arena.players = this.arena.players.filter(player => player.id !== client.sessionId);
     if (this.arena.hostId === client.sessionId) this.arena.hostId = this.arena.players[0]?.id || null;
     this.arena.revision++;
-    this.sendSnapshots();
+    this.state.players.delete(client.sessionId);
+    playerLeft();
+    this.syncState(Date.now());
+    if (!this.arena.players.length) this.emptyTimer = setTimeout(() => this.disconnect(), 30_000);
   }
 
   async onDispose() {
+    clearTimeout(this.emptyTimer);
+    roomDisposed(this.arena?.players?.length || 0);
     await this.presence.srem(ROOM_IDS, this.roomId);
   }
 
@@ -545,35 +523,134 @@ export class ArenaRoom extends Room {
     return publicRoom(this.arena, now, this.playerFor(client));
   }
 
-  sendSnapshot(client) {
-    const player = this.playerFor(client);
-    if (player) client.send("snapshot", { room: publicRoom(this.arena, Date.now(), player) });
+  step() {
+    const started = performance.now();
+    const now = Date.now();
+    this.arena.tick++;
+    for (const player of this.arena.players) this.stepPlayer(player, now);
+    tick(this.arena, now);
+    for (const player of this.arena.players) this.resolveFires(player, now);
+    if (this.arena.tick % 120 === 0) this.pingClients(now);
+    this.arena.revision++;
+    this.syncState(now);
+    recordTick(performance.now() - started);
   }
 
-  sendSnapshots() {
+  countMessage(player, now, channel = "input") {
+    const windowKey = channel === "input" ? "inputWindowAt" : "actionWindowAt";
+    const countKey = channel === "input" ? "inputCount" : "actionCount";
+    const limit = channel === "input" ? 70 : 40;
+    if (now - player[windowKey] >= 1000) { player[windowKey] = now; player[countKey] = 0; }
+    if (++player[countKey] <= limit) return true;
+    if (++player.strikes >= 5) this.clients.find(client => client.sessionId === player.id)?.leave(4002, "Input rate exceeded");
+    return false;
+  }
+
+  queueInput(client, body) {
+    const player = this.playerFor(client);
+    if (!player || !(body instanceof Uint8Array) || body.byteLength !== 12) { inputMessage(false); return; }
     const now = Date.now();
+    if (!this.countMessage(player, now, "input") || this.arena.phase !== "playing") { inputMessage(false); return; }
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const seq = view.getUint32(0, true), buttons = view.getUint8(4), dtTicks = view.getUint16(9, true);
+    if (!seq || seq <= player.ackInput || dtTicks < 1 || dtTicks > 3) { player.strikes++; inputMessage(false); return; }
+    const input = { seq, dtTicks, fwd:(buttons&1?1:0)-(buttons&2?1:0), right:(buttons&4?1:0)-(buttons&8?1:0), jump:!!(buttons&16), slidePressed:!!(buttons&32), sprint:!!(buttons&64), aiming:!!(buttons&128), yaw:view.getInt16(5,true)/10000, pitch:view.getInt16(7,true)/10000, weapon:view.getUint8(11) };
+    player.pendingInputs.push(input);
+    if (player.pendingInputs.length > 30) { player.pendingInputs.splice(0, player.pendingInputs.length - 30); player.strikes++; }
+    inputMessage(true);
+  }
+
+  queueFire(client, body) {
+    const player = this.playerFor(client);
+    if (!player || !(body instanceof Uint8Array) || body.byteLength !== 13 || !this.countMessage(player, Date.now(), "action")) return;
+    const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const fire = { seq:view.getUint32(0,true), tick:view.getUint32(4,true), yaw:view.getInt16(8,true)/10000, pitch:view.getInt16(10,true)/10000, weapon:view.getUint8(12), aiming:player.lastInput.aiming };
+    if (!fire.seq || fire.seq <= player.ack || player.pendingFires.length >= 12) { player.strikes++; return; }
+    player.pendingFires.push(fire);
+  }
+
+  handleAction(client, action) {
+    const player = this.playerFor(client);
+    if (!player || !action || typeof action !== "object" || !this.countMessage(player, Date.now(), "action")) return;
+    applyActions(this.arena, player, { actions:[action] }, Date.now());
+    this.syncState(Date.now());
+  }
+
+  pingClients(now) {
     for (const client of this.clients) {
       const player = this.playerFor(client);
-      if (player) client.send("snapshot", { room: publicRoom(this.arena, now, player) });
+      if (!player) continue;
+      player.pingNonce = (player.pingNonce + 1) >>> 0;
+      player.pingSentAt = now;
+      client.send("ping", player.pingNonce);
     }
   }
 
-  step() {
-    tick(this.arena, Date.now());
-    this.arena.revision++;
-    this.sendSnapshots();
+  handlePong(client, nonce) {
+    const player = this.playerFor(client);
+    if (!player || nonce !== player.pingNonce || !player.pingSentAt) return;
+    const sample = clamp(Date.now() - player.pingSentAt, 0, 2000);
+    player.rtt = player.rtt ? player.rtt * 0.7 + sample * 0.3 : sample;
+    player.pingSentAt = 0;
   }
 
-  handleSync(client, body) {
-    const player = this.playerFor(client);
-    if (!player || !body || typeof body !== "object" || Array.isArray(body)) return;
-    const now = Date.now();
-    if (Number.isFinite(body.sentAt)) player.echo = body.sentAt;
-    if (Number.isSafeInteger(body.eventCursor) && body.eventCursor >= 0) player.eventCursor = body.eventCursor;
-    if (this.arena.phase !== "playing" || body.round !== this.arena.round || body.life !== player.life) return;
-    applyInputs(this.arena, player, decodeFrames(body), now);
-    applyActions(this.arena, player, body, now);
-    this.arena.revision++;
+  stepPlayer(player, now) {
+    if (!player.alive || this.arena.phase !== "playing") return;
+    player.inputTicks = Math.min(6, (player.inputTicks || 0) + 1);
+    const q = player.pendingInputs, count = Math.min(q.length, q.length > 6 ? 3 : 1);
+    if (!count) {
+      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, map:this.arena.map };
+      player.pose = simulateMovement(player.pose, held, TICK);
+    }
+    for (let index=0; index<count; index++) {
+      const input = q.shift();
+      if (input.dtTicks > player.inputTicks) { player.strikes++; continue; }
+      player.inputTicks -= input.dtTicks;
+      if (Number.isInteger(input.weapon) && gunsFor(player)[input.weapon] && input.weapon !== player.weapon && this.arena.mode !== "gun") {
+        player.weapon = input.weapon; player.reloadEnd = 0; player.swapUntil = now + 350;
+      }
+      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, map:this.arena.map };
+      for (let step=0; step<input.dtTicks; step++) player.pose = simulateMovement(player.pose, { ...clean, jump:step===0&&clean.jump, slidePressed:step===0&&clean.slidePressed }, TICK);
+      player.pose.yaw = clean.yaw; player.pose.pitch = clamp(clean.pitch,-1.45,1.45);
+      player.lastInput = { ...clean, jump:false, slidePressed:false };
+      player.ackInput = input.seq;
+    }
+    player.history.push({ tick:this.arena.tick, at:now, pose:{...player.pose} });
+    player.history = player.history.slice(-60);
+  }
+
+  resolveFires(player, now) {
+    for (const fire of player.pendingFires.splice(0, 8)) {
+      player.ack = Math.max(player.ack, fire.seq);
+      if (fire.weapon !== player.weapon) { player.strikes++; continue; }
+      const rewindTicks = clamp(Math.round(((player.rtt || 0) / 2 + 100) / TICK_MS), 0, 60);
+      fire.tick = this.arena.tick - rewindTicks;
+      shoot(this.arena, player, fire, now);
+    }
+  }
+
+  syncState(now) {
+    const state=this.state, arena=this.arena;
+    state.code=arena.code; state.map=arena.map; state.mode=arena.mode; state.hostId=arena.hostId||"";
+    state.phase=arena.phase==="waiting"?0:arena.phase==="playing"?1:2; state.tick=arena.tick; state.round=arena.round;
+    state.endsAtTick=arena.phase==="playing"?arena.tick+Math.max(0,Math.ceil((arena.endsAt-now)/TICK_MS)):arena.tick;
+    state.serverTime=now;
+    for (const player of arena.players) {
+      let net=state.players.get(player.id); if(!net){net=new PlayerNetState();state.players.set(player.id,net)}
+      const p=player.pose, q=value=>clamp(Math.round((Number(value)||0)*100),-32768,32767);
+      net.name=player.name; net.x=q(p.x); net.y=q(p.y); net.z=q(p.z); net.vx=q(p.vx); net.vy=q(p.vy); net.vz=q(p.vz);
+      net.yawQ=clamp(Math.round(angleDelta(p.yaw,0)/Math.PI*127),-127,127); net.pitchQ=clamp(Math.round((p.pitch||0)/1.45*127),-127,127);
+      net.hp=clamp(Math.round(player.hp),0,100); net.flags=(player.alive?1:0)|(p.grounded?2:0)|(p.slide?4:0)|(player.lastInput?.aiming?8:0)|(player.reloadEnd?16:0);
+      net.weapon=player.weapon; net.team=player.team; net.gunStage=player.gunStage; net.kills=player.kills; net.deaths=player.deaths; net.life=player.life; net.score=player.score;
+      net.lastSeq=player.ackInput; net.lastActionSeq=player.ack; net.respawnIn=player.alive?0:clamp(Math.ceil((player.respawnAt-now)/TICK_MS),0,65535);
+      net.ammo0=clamp(player.ammo?.[0]||0,0,255); net.ammo1=clamp(player.ammo?.[1]||0,0,255);
+    }
+    for (const event of arena.events) if(event.seq>this.schemaEventSeq){
+      const net=new NetEvent(), origin=event.origin||event.from||event.pos||{}, end=event.end||event.pos||{};
+      Object.assign(net,{seq:event.seq,type:event.type||"",player:event.player||"",target:event.target||"",killer:event.killer||"",victim:event.victim||"",weaponId:event.weaponId||"",actionSeq:event.actionSeq||0,score:event.score||0,color:event.color||0,head:!!event.head,ox:Math.round((origin.x||0)*100),oy:Math.round((origin.y||0)*100),oz:Math.round((origin.z||0)*100),ex:Math.round((end.x||0)*100),ey:Math.round((end.y||0)*100),ez:Math.round((end.z||0)*100)});
+      state.events.push(net); this.schemaEventSeq=event.seq;
+    }
+    while(state.events.length>32)state.events.shift();
   }
 
   startMatch(client) {
@@ -598,7 +675,7 @@ export class ArenaRoom extends Room {
       spawn(this.arena, value, now);
     });
     this.arena.revision++;
-    this.sendSnapshots();
+    this.syncState(now);
     return { room: this.snapshotFor(client) };
   }
 }
