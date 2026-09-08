@@ -3,8 +3,12 @@ import { uWebSocketsTransport } from "@colyseus/uwebsockets-transport";
 import { metricsSnapshot } from "./metrics.js";
 import { ArenaRoom } from "./rooms/ArenaRoom.js";
 
+const transport = process.env.COLYSEUS_CLOUD === undefined
+  ? { transport: new uWebSocketsTransport() }
+  : {};
+
 const server = defineServer({
-  transport: new uWebSocketsTransport(),
+  ...transport,
   rooms: {
     blockrush: defineRoom(ArenaRoom).filterBy(["public", "map", "mode"])
   },
