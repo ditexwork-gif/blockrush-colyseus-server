@@ -28,9 +28,7 @@
   },
   "dependencies": {
     "@colyseus/tools": "0.18.1",
-    "@colyseus/uwebsockets-transport": "^0.18.2",
     "colyseus": "0.18.5",
-    "express": "5.2.1",
-    "uwebsockets-express": "^2.0.4"
+    "express": "5.2.1"
   }
 }
