@@ -7,7 +7,8 @@ Authoritative WebSocket room server for the public BLOCKRUSH browser game.
 - Server-side shooting, ammunition, damage, scoring, respawn, and one-second rewind.
 - Client RTT measured by a server challenge; rewind is server-selected and capped.
 - Eight-player private rooms, compatible-room Quick Play, and 20-second reconnection.
-- `uWebSockets.js` transport plus `/health` and `/metrics` endpoints.
+- `uWebSockets.js` transport when self-hosted; Colyseus Cloud's managed transport
+  in Cloud; `/health` and `/metrics` endpoints in both environments.
 
 ## Local verification
 
