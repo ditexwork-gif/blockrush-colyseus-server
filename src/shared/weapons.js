@@ -5,7 +5,7 @@ export const WEAPONS=[
   "cls": "AR",
   "cap": 30,
   "damage": 27,
-  "delay": 0.115,
+  "delay": 0.12,
   "reload": 1.65,
   "spread": 0.007,
   "speed": 8.2,
@@ -92,7 +92,7 @@ export const WEAPONS=[
   "slot": "primary",
   "cls": "SHOTGUN",
   "cap": 8,
-  "damage": 12,
+  "damage": 13,
   "delay": 0.75,
   "reload": 2.4,
   "spread": 0.06,
@@ -137,7 +137,7 @@ export const WEAPONS=[
   "cls": "AR",
   "cap": 24,
   "damage": 30,
-  "delay": 0.09,
+  "delay": 0.29,
   "reload": 1.7,
   "spread": 0.005,
   "speed": 8,
@@ -161,7 +161,7 @@ export const WEAPONS=[
   "cls": "DMR",
   "cap": 10,
   "damage": 55,
-  "delay": 0.32,
+  "delay": 0.6,
   "reload": 1.9,
   "spread": 0.004,
   "speed": 7.8,
@@ -205,7 +205,7 @@ export const WEAPONS=[
   "cls": "LMG",
   "cap": 100,
   "damage": 22,
-  "delay": 0.085,
+  "delay": 0.1,
   "reload": 3.4,
   "spread": 0.016,
   "speed": 6.8,
@@ -226,8 +226,8 @@ export const WEAPONS=[
   "slot": "primary",
   "cls": "SHOTGUN",
   "cap": 12,
-  "damage": 9,
-  "delay": 0.28,
+  "damage": 13,
+  "delay": 0.38,
   "reload": 2.6,
   "spread": 0.07,
   "speed": 8.2,
@@ -250,7 +250,7 @@ export const WEAPONS=[
   "cls": "AR",
   "cap": 20,
   "damage": 38,
-  "delay": 0.14,
+  "delay": 0.185,
   "reload": 1.8,
   "spread": 0.006,
   "speed": 7.6,
@@ -271,7 +271,7 @@ export const WEAPONS=[
   "slot": "primary",
   "cls": "SNIPER",
   "cap": 2,
-  "damage": 140,
+  "damage": 95,
   "delay": 1.4,
   "reload": 2.8,
   "spread": 0.01,
@@ -345,6 +345,14 @@ export const WEAPONS=[
 export const byId=Object.fromEntries(WEAPONS.map(w=>[w.id,w]));
 export const STARTERS=["AR-30","SMG-40","SR-6","P-9"];
 export function damageAtRange(w,d){const [full,end]=w.range;return end<=full?1:Math.max(0,Math.min(1,1-(d-full)/(end-full)))*.6+.4}
-export function cardState(p,w){return p.level<w.level?"locked":p.unlocks.includes(w.id)?(p.loadout[w.slot]===w.id?"equipped":"owned"):p.coins>=w.price?"affordable":"expensive"}
+function selectedLoadout(p){return p.classes?.[p.selectedClass]||p.loadout||{}}
+export function cardState(p,w){return p.level<w.level?"locked":p.unlocks.includes(w.id)?(selectedLoadout(p)[w.slot]===w.id?"equipped":"owned"):p.coins>=w.price?"affordable":"expensive"}
 export function purchaseWeapon(p,id){const w=byId[id];if(!w||cardState(p,w)!=="affordable")return false;p.coins-=w.price;p.unlocks.push(id);return true}
-export function equipWeapon(p,id){const w=byId[id];if(!w||!p.unlocks.includes(id))return false;p.loadout[w.slot]=id;return true}
+export function equipWeapon(p,id){const w=byId[id],loadout=selectedLoadout(p);if(!w||!p.unlocks.includes(id)||!loadout)return false;loadout[w.slot]=id;p.loadout={primary:loadout.primary,secondary:loadout.secondary};return true}
+
+// Accuracy counts magazine rounds that hit at least one enemy, not pellet/actor hits.
+export function weaponAccuracy(stats){const shots=Math.max(0,Number(stats?.shots)||0);return shots<50?null:Math.round(Math.min(shots,Math.max(0,Number(stats?.hits)||0))/shots*100)}
+export function botWeaponPool(level){return WEAPONS.filter(w=>w.level<=Math.max(1,Number(level)||1)+4)}
+export function fireRate(w){return w.burst?w.burst/(w.delay+(w.burst-1)*w.burstDelay):1/w.delay}
+export function weaponRecoil(w){return (w.cls==='SNIPER'?.018:w.cls==='SMG'?.0032:w.cls==='LMG'?.0055:w.cls==='SHOTGUN'?.009:w.cls==='DMR'?.01:.0045)*(w.heavy?2:1)}
+export function bodyTTK(w,distance=0){const count=Math.ceil(100/(w.damage*w.pellets*damageAtRange(w,distance)));if(w.burst){const gaps=count-1;return Math.floor(gaps/w.burst)*w.delay+(gaps-Math.floor(gaps/w.burst))*w.burstDelay}return (count-1)*w.delay+(w.charge||0)}

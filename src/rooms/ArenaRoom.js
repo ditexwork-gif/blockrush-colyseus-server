@@ -13,6 +13,8 @@ const WALLS = { foundry: ARENA_SOLIDS, depot: DEPOT_SOLIDS };
 const ROOM_IDS = "$blockrush-room-ids";
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MATCH_MS = 180_000;
+const PUBLIC_START_MS = 12_000;
+const BOT_NAMES = ["RIVET","GHOST","BRICK","PIXEL","ROOK","NOVA","BOLT"];
 const TICK_RATE = 60;
 const TICK_MS = 1000 / TICK_RATE;
 const TICK = 1 / TICK_RATE;
@@ -90,8 +92,9 @@ function makePlayer(arena, id, name, now) {
   };
   player.pendingInputs = [];
   player.pendingFires = [];
+  player.lastQueuedInput = 0;
+  player.lastQueuedFire = 0;
   player.lastInput = { fwd: 0, right: 0, jump: false, slidePressed: false, sprint: false, aiming: false, yaw: 0, pitch: 0 };
-  player.inputTicks = 3;
   player.inputWindowAt = now;
   player.inputCount = 0;
   player.actionWindowAt = now;
@@ -104,13 +107,26 @@ function makePlayer(arena, id, name, now) {
   return player;
 }
 
+function makeBot(arena, now) {
+  const index=arena.botSerial++;
+  const bot=makePlayer(arena,`BOT-${index}-${arena.round}`,BOT_NAMES[index%BOT_NAMES.length],now);
+  bot.bot=true;bot.botSeed=index*1.731+arena.round;bot.nextBotFire=now+700+(index%6)*110;
+  return bot;
+}
+
+function humans(arena){return arena.players.filter(player=>!player.bot)}
+function fillBots(arena, state, now, target=6){
+  while(arena.players.length<target){const bot=makeBot(arena,now);arena.players.push(bot);state.players.set(bot.id,new PlayerNetState())}
+}
+
 function tick(arena, now) {
   arena.tickAt = now;
   if (!arena.players.some(player => player.id === arena.hostId)) arena.hostId = arena.players[0]?.id || null;
   if (arena.phase === "playing") tickProjectiles(arena, now);
   if (arena.phase === "playing" && now >= arena.endsAt) arena.phase = "finished";
   for (const player of arena.players) {
-    if (arena.phase === "playing" && !player.alive && now >= player.respawnAt) spawn(arena, player, now);
+    if (arena.phase !== "playing") continue;
+    if (!player.alive && now >= player.respawnAt) spawn(arena, player, now);
     if (player.reloadEnd && now >= player.reloadEnd) {
       player.ammo[player.reloadWeapon] = gunsFor(player)[player.reloadWeapon].cap;
       player.reloadEnd = 0;
@@ -136,11 +152,13 @@ function publicRoom(arena, now, player) {
     hostId: arena.hostId,
     serverTime: now,
     endsAt: arena.endsAt,
+    startsIn: arena.phase==="waiting"&&arena.quickStartsAt?Math.max(0,Math.ceil((arena.quickStartsAt-now)/1000)):0,
     events: arena.events.filter(value => value.seq > (player?.eventCursor || 0)),
     self: player ? { id: player.id, ack: player.ack, ackInput: player.ackInput, ammo: player.ammo, echo: player.echo } : null,
     players: arena.players.map(value => ({
       id: value.id,
       name: value.name,
+      bot: !!value.bot,
       pose: value.pose,
       hp: value.hp,
       alive: value.alive,
@@ -454,13 +472,17 @@ export class ArenaRoom extends Room {
       projectiles: []
     };
     this.arena.tick = 0;
+    this.arena.botSerial = 0;
+    this.arena.quickStartsAt = 0;
     this.schemaEventSeq = 0;
     this.emptyTimer = null;
+    this.quickStartTimer = null;
+    this.trafficRate = 1000;
     this.autoDispose = false;
     const state = new ArenaState();
     state.code = this.roomId; state.map = map; state.mode = mode; state.serverTime = now;
     this.setState(state);
-    this.setPatchRate(50);
+    this.setPatchRate(this.trafficRate);
     this.setSimulationInterval(() => this.step(), TICK_MS);
     roomCreated();
   }
@@ -468,16 +490,35 @@ export class ArenaRoom extends Room {
   onJoin(client, options) {
     clearTimeout(this.emptyTimer);
     const now = Date.now();
+    if (this.metadata.public && this.arena.phase === "playing") {
+      const bot=this.arena.players.find(value=>value.bot);
+      if(bot){this.arena.players=this.arena.players.filter(value=>value!==bot);this.state.players.delete(bot.id)}
+    }
     const player = makePlayer(this.arena, client.sessionId, options?.name, now);
     this.arena.players.push(player);
     if (!this.arena.hostId) this.arena.hostId = player.id;
     this.arena.revision++;
     this.state.players.set(player.id, new PlayerNetState());
     playerJoined();
+    if(this.metadata.public && this.arena.phase==="waiting"){
+      if(humans(this.arena).length>=2)this.beginMatch(now,true);
+      else if(!this.quickStartTimer){
+        this.arena.quickStartsAt=now+PUBLIC_START_MS;
+        this.quickStartTimer=setTimeout(()=>{this.quickStartTimer=null;if(this.arena.phase==="waiting"&&humans(this.arena).length)this.beginMatch(Date.now(),true)},PUBLIC_START_MS);
+      }
+    }
     this.syncState(now);
   }
 
   onDrop(client) {
+    const player = this.playerFor(client);
+    if (player) {
+      player.pendingInputs.length = 0;
+      player.pendingFires.length = 0;
+      player.lastQueuedInput = player.ackInput;
+      player.lastQueuedFire = player.ack;
+      player.lastInput = { ...player.lastInput, fwd:0, right:0, jump:false, slidePressed:false, sprint:false, aiming:false };
+    }
     this.allowReconnection(client, 20).catch(() => {});
   }
 
@@ -492,16 +533,25 @@ export class ArenaRoom extends Room {
 
   onLeave(client) {
     this.arena.players = this.arena.players.filter(player => player.id !== client.sessionId);
-    if (this.arena.hostId === client.sessionId) this.arena.hostId = this.arena.players[0]?.id || null;
+    if (this.arena.hostId === client.sessionId) this.arena.hostId = humans(this.arena)[0]?.id || null;
     this.arena.revision++;
     this.state.players.delete(client.sessionId);
     playerLeft();
-    this.syncState(Date.now());
-    if (!this.arena.players.length) this.emptyTimer = setTimeout(() => this.disconnect(), 30_000);
+    const now=Date.now();
+    if(this.metadata.public&&this.arena.phase==="playing"&&humans(this.arena).length)fillBots(this.arena,this.state,now);
+    this.syncState(now);
+    if (!humans(this.arena).length) {
+      clearTimeout(this.quickStartTimer);this.quickStartTimer=null;
+      this.arena.quickStartsAt=0;
+      for(const bot of this.arena.players.filter(value=>value.bot))this.state.players.delete(bot.id);
+      this.arena.players=[];this.arena.hostId=null;
+      this.emptyTimer = setTimeout(() => this.disconnect(), 30_000);
+    }
   }
 
   async onDispose() {
     clearTimeout(this.emptyTimer);
+    clearTimeout(this.quickStartTimer);
     roomDisposed(this.arena?.players?.length || 0);
     await this.presence.srem(ROOM_IDS, this.roomId);
   }
@@ -526,14 +576,38 @@ export class ArenaRoom extends Room {
   step() {
     const started = performance.now();
     const now = Date.now();
+    const priorPhase = this.arena.phase;
     this.arena.tick++;
-    for (const player of this.arena.players) this.stepPlayer(player, now);
+    for (const player of this.arena.players) { if(player.bot)this.driveBot(player,now); this.stepPlayer(player, now); }
     tick(this.arena, now);
     for (const player of this.arena.players) this.resolveFires(player, now);
     if (this.arena.tick % 120 === 0) this.pingClients(now);
-    this.arena.revision++;
-    this.syncState(now);
+    if (priorPhase !== this.arena.phase) {
+      this.setTrafficMode(this.arena.phase);
+      for (const player of this.arena.players) { player.pendingInputs.length=0; player.pendingFires.length=0; }
+    }
+    if (this.arena.phase === "playing" || priorPhase !== this.arena.phase || this.arena.tick % 60 === 0) {
+      this.arena.revision++;
+      this.syncState(now);
+    }
     recordTick(performance.now() - started);
+  }
+
+  setTrafficMode(phase) {
+    const rate = phase === "playing" ? 50 : 1000;
+    if (rate === this.trafficRate) return;
+    this.trafficRate = rate;
+    this.setPatchRate(rate);
+  }
+
+  driveBot(player,now){
+    if(this.arena.phase!=="playing"||!player.alive)return;
+    const opponents=this.arena.players.filter(value=>value.id!==player.id&&value.alive&&(this.arena.mode!=="tdm"||value.team!==player.team));
+    const target=opponents.sort((a,b)=>Math.hypot(a.pose.x-player.pose.x,a.pose.z-player.pose.z)-Math.hypot(b.pose.x-player.pose.x,b.pose.z-player.pose.z))[0];
+    if(!target){player.lastInput={...player.lastInput,fwd:0,right:0,jump:false,slidePressed:false};return}
+    const dx=target.pose.x-player.pose.x,dz=target.pose.z-player.pose.z,distance=Math.hypot(dx,dz),yaw=Math.atan2(-dx,-dz),phase=this.arena.tick*.035+player.botSeed;
+    player.lastInput={...player.lastInput,fwd:distance>7?1:0,right:Math.sin(phase)>.2?1:Math.sin(phase)<-.2?-1:0,jump:false,slidePressed:false,sprint:distance>12,aiming:distance<45,yaw,pitch:clamp(Math.atan2(target.pose.y-player.pose.y,distance),-1.2,1.2)};
+    if(distance<42&&now>=player.nextBotFire){player.nextBotFire=now+420+(player.botSeed%1)*180;player.pendingFires.push({seq:++player.ack,tick:this.arena.tick,yaw:player.lastInput.yaw,pitch:player.lastInput.pitch,weapon:player.weapon,aiming:true})}
   }
 
   countMessage(player, now, channel = "input") {
@@ -550,28 +624,35 @@ export class ArenaRoom extends Room {
     const player = this.playerFor(client);
     if (!player || !(body instanceof Uint8Array) || body.byteLength !== 12) { inputMessage(false); return; }
     const now = Date.now();
-    if (!this.countMessage(player, now, "input") || this.arena.phase !== "playing") { inputMessage(false); return; }
+    if (this.arena.phase !== "playing") return;
+    if (!this.countMessage(player, now, "input")) { inputMessage(false); return; }
     const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
     const seq = view.getUint32(0, true), buttons = view.getUint8(4), dtTicks = view.getUint16(9, true);
-    if (!seq || seq <= player.ackInput || dtTicks < 1 || dtTicks > 3) { player.strikes++; inputMessage(false); return; }
+    if (!seq || seq <= player.lastQueuedInput || seq > player.ackInput + 180 || dtTicks < 1 || dtTicks > 3) { player.strikes++; inputMessage(false); return; }
     const input = { seq, dtTicks, fwd:(buttons&1?1:0)-(buttons&2?1:0), right:(buttons&4?1:0)-(buttons&8?1:0), jump:!!(buttons&16), slidePressed:!!(buttons&32), sprint:!!(buttons&64), aiming:!!(buttons&128), yaw:view.getInt16(5,true)/10000, pitch:view.getInt16(7,true)/10000, weapon:view.getUint8(11) };
     player.pendingInputs.push(input);
-    if (player.pendingInputs.length > 30) { player.pendingInputs.splice(0, player.pendingInputs.length - 30); player.strikes++; }
+    player.lastQueuedInput = seq;
+    if (player.pendingInputs.length > 30) {
+      const dropped=player.pendingInputs.splice(0, player.pendingInputs.length - 30);
+      player.ackInput=Math.max(player.ackInput,...dropped.map(value=>value.seq));
+      player.strikes++;
+    }
     inputMessage(true);
   }
 
   queueFire(client, body) {
     const player = this.playerFor(client);
-    if (!player || !(body instanceof Uint8Array) || body.byteLength !== 13 || !this.countMessage(player, Date.now(), "action")) return;
+    if (!player || this.arena.phase !== "playing" || !(body instanceof Uint8Array) || body.byteLength !== 13 || !this.countMessage(player, Date.now(), "action")) return;
     const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
     const fire = { seq:view.getUint32(0,true), tick:view.getUint32(4,true), yaw:view.getInt16(8,true)/10000, pitch:view.getInt16(10,true)/10000, weapon:view.getUint8(12), aiming:player.lastInput.aiming };
-    if (!fire.seq || fire.seq <= player.ack || player.pendingFires.length >= 12) { player.strikes++; return; }
+    if (!fire.seq || fire.seq <= player.lastQueuedFire || player.pendingFires.length >= 12) { player.strikes++; return; }
     player.pendingFires.push(fire);
+    player.lastQueuedFire = fire.seq;
   }
 
   handleAction(client, action) {
     const player = this.playerFor(client);
-    if (!player || !action || typeof action !== "object" || !this.countMessage(player, Date.now(), "action")) return;
+    if (!player || this.arena.phase !== "playing" || !action || typeof action !== "object" || !this.countMessage(player, Date.now(), "action")) return;
     applyActions(this.arena, player, { actions:[action] }, Date.now());
     this.syncState(Date.now());
   }
@@ -596,7 +677,6 @@ export class ArenaRoom extends Room {
 
   stepPlayer(player, now) {
     if (!player.alive || this.arena.phase !== "playing") return;
-    player.inputTicks = Math.min(6, (player.inputTicks || 0) + 1);
     const q = player.pendingInputs, count = Math.min(q.length, q.length > 6 ? 3 : 1);
     if (!count) {
       const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, map:this.arena.map };
@@ -604,13 +684,13 @@ export class ArenaRoom extends Room {
     }
     for (let index=0; index<count; index++) {
       const input = q.shift();
-      if (input.dtTicks > player.inputTicks) { player.strikes++; continue; }
-      player.inputTicks -= input.dtTicks;
       if (Number.isInteger(input.weapon) && gunsFor(player)[input.weapon] && input.weapon !== player.weapon && this.arena.mode !== "gun") {
         player.weapon = input.weapon; player.reloadEnd = 0; player.swapUntil = now + 350;
       }
       const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, map:this.arena.map };
+      const before = player.pose;
       for (let step=0; step<input.dtTicks; step++) player.pose = simulateMovement(player.pose, { ...clean, jump:step===0&&clean.jump, slidePressed:step===0&&clean.slidePressed }, TICK);
+      if (![player.pose.x,player.pose.y,player.pose.z,player.pose.vx,player.pose.vy,player.pose.vz].every(Number.isFinite)) { player.pose=before; player.strikes++; }
       player.pose.yaw = clean.yaw; player.pose.pitch = clamp(clean.pitch,-1.45,1.45);
       player.lastInput = { ...clean, jump:false, slidePressed:false };
       player.ackInput = input.seq;
@@ -620,6 +700,7 @@ export class ArenaRoom extends Room {
   }
 
   resolveFires(player, now) {
+    if (this.arena.phase !== "playing") { player.pendingFires.length=0; return; }
     for (const fire of player.pendingFires.splice(0, 8)) {
       player.ack = Math.max(player.ack, fire.seq);
       if (fire.weapon !== player.weapon) { player.strikes++; continue; }
@@ -633,12 +714,13 @@ export class ArenaRoom extends Room {
     const state=this.state, arena=this.arena;
     state.code=arena.code; state.map=arena.map; state.mode=arena.mode; state.hostId=arena.hostId||"";
     state.phase=arena.phase==="waiting"?0:arena.phase==="playing"?1:2; state.tick=arena.tick; state.round=arena.round;
+    state.startsIn=arena.phase==="waiting"&&arena.quickStartsAt?clamp(Math.ceil((arena.quickStartsAt-now)/1000),0,255):0;
     state.endsAtTick=arena.phase==="playing"?arena.tick+Math.max(0,Math.ceil((arena.endsAt-now)/TICK_MS)):arena.tick;
     state.serverTime=now;
     for (const player of arena.players) {
       let net=state.players.get(player.id); if(!net){net=new PlayerNetState();state.players.set(player.id,net)}
       const p=player.pose, q=value=>clamp(Math.round((Number(value)||0)*100),-32768,32767);
-      net.name=player.name; net.x=q(p.x); net.y=q(p.y); net.z=q(p.z); net.vx=q(p.vx); net.vy=q(p.vy); net.vz=q(p.vz);
+      net.name=player.name; net.bot=!!player.bot; net.x=q(p.x); net.y=q(p.y); net.z=q(p.z); net.vx=q(p.vx); net.vy=q(p.vy); net.vz=q(p.vz);
       net.yawQ=clamp(Math.round(angleDelta(p.yaw,0)/Math.PI*127),-127,127); net.pitchQ=clamp(Math.round((p.pitch||0)/1.45*127),-127,127);
       net.hp=clamp(Math.round(player.hp),0,100); net.flags=(player.alive?1:0)|(p.grounded?2:0)|(p.slide?4:0)|(player.lastInput?.aiming?8:0)|(player.reloadEnd?16:0);
       net.weapon=player.weapon; net.team=player.team; net.gunStage=player.gunStage; net.kills=player.kills; net.deaths=player.deaths; net.life=player.life; net.score=player.score;
@@ -653,15 +735,14 @@ export class ArenaRoom extends Room {
     while(state.events.length>32)state.events.shift();
   }
 
-  startMatch(client) {
-    const player = this.playerFor(client);
-    if (!player) throw new Error("Your room session ended. Join the room again.");
-    if (player.id !== this.arena.hostId) throw new Error("Only the room host can start the match.");
-    if (this.arena.players.length < 2) throw new Error("Invite at least one friend before starting.");
-    if (this.arena.phase === "playing") return { room: this.snapshotFor(client) };
-    const now = Date.now();
+  beginMatch(now=Date.now(),shouldFillBots=false) {
+    clearTimeout(this.quickStartTimer);
+    this.quickStartTimer=null;
+    this.arena.quickStartsAt=0;
+    this.setTrafficMode("playing");
     this.arena.phase = "playing";
     this.arena.round++;
+    if(shouldFillBots)fillBots(this.arena,this.state,now);
     this.arena.endsAt = now + MATCH_MS;
     this.arena.events = [];
     this.arena.projectiles = [];
@@ -676,6 +757,16 @@ export class ArenaRoom extends Room {
     });
     this.arena.revision++;
     this.syncState(now);
+  }
+
+  startMatch(client) {
+    const player = this.playerFor(client);
+    if (!player) throw new Error("Your room session ended. Join the room again.");
+    if (player.id !== this.arena.hostId) throw new Error("Only the room host can start the match.");
+    if (!this.metadata.public && humans(this.arena).length < 2) throw new Error("Invite at least one friend before starting.");
+    if (this.arena.phase === "playing") return { room: this.snapshotFor(client) };
+    const now = Date.now();
+    this.beginMatch(now,this.metadata.public);
     return { room: this.snapshotFor(client) };
   }
 }

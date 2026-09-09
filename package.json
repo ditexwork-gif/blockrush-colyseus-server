@@ -2,7 +2,7 @@
   "private": true,
   "name": "blockrush-colyseus-server",
   "version": "1.0.0",
-  "description": "Authoritative real-time multiplayer server for BLOCKRUSH",
+  "description": "Authoritative real-time multiplayer server for BLOCKRIFT",
   "type": "module",
   "main": "build/index.js",
   "engines": {

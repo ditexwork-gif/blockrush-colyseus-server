@@ -16,7 +16,7 @@ function firePacket(seq: number, tick: number, yaw = 0, pitch = 0, weapon = 0) {
   view.setUint8(12, weapon); return bytes;
 }
 
-describe("BLOCKRUSH realtime room", () => {
+describe("BLOCKRIFT realtime room", () => {
   let colyseus: ColyseusTestServer<typeof appConfig>;
 
   before(async () => { colyseus = await boot(appConfig); });
@@ -47,7 +47,7 @@ describe("BLOCKRUSH realtime room", () => {
     const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa", public: false });
     const host: any = await colyseus.connectTo(room, { name: "HOST" });
     assert.equal(room.maxClients, 8);
-    assert.equal(room.patchRate, 50);
+    assert.equal(room.patchRate, 1000, "waiting rooms use only a low-frequency heartbeat");
     const player = host.state.players.get(host.sessionId);
     assert.equal(typeof player.x, "number");
     assert.equal(typeof player.lastSeq, "number");
@@ -58,11 +58,18 @@ describe("BLOCKRUSH realtime room", () => {
     const options = { map: "foundry", mode: "ffa", public: true, name: "QUICK" };
     const first: any = await colyseus.sdk.joinOrCreate("blockrush", options);
     await first.waitForInitialState();
+    assert.ok(first.state.startsIn >= 11 && first.state.startsIn <= 12);
     const second: any = await colyseus.sdk.joinOrCreate("blockrush", { ...options, name: "SECOND" });
     await second.waitForInitialState();
     assert.equal(second.roomId, first.roomId);
     await wait(80);
-    assert.equal(first.state.players.size, 2);
+    assert.equal(first.state.players.size, 6);
+    assert.equal([...first.state.players.values()].filter((player: any) => player.bot).length, 4);
+    assert.equal(first.state.phase, 1, "a second human immediately starts Quick Play");
+    await second.leave();
+    await wait(80);
+    assert.equal(first.state.players.size, 6, "a bot fills a permanently vacated public seat");
+    assert.equal(new Set([...first.state.players.keys()]).size, 6, "replacement bot ids stay unique");
   });
 
   it("exposes room and fixed-tick performance metrics", async () => {
@@ -88,6 +95,61 @@ describe("BLOCKRUSH realtime room", () => {
     const updated = await host.request("snapshot", {});
     assert.equal(updated.room.self.ackInput, 6);
     assert.ok(updated.room.players.find((player: any) => player.id === host.sessionId).pose.z < before);
+  });
+
+  it("drains a burst of inputs without leaving the client in permanent replay", async () => {
+    const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
+    const host = await colyseus.connectTo(room, { name: "HOST" });
+    await colyseus.connectTo(room, { name: "GUEST" });
+    await host.request("start", {});
+    const player = room.arena.players.find((value: any) => value.id === host.sessionId);
+    const before = player.pose.z;
+    for (let seq = 1; seq <= 40; seq++) host.send("i", inputPacket(seq));
+    player.hp = 60;
+    await wait(500);
+    const updated = await host.request("snapshot", {});
+    assert.equal(updated.room.self.ackInput, 40);
+    assert.equal(player.pendingInputs.length, 0);
+    assert.ok(player.pose.z < before, "taking damage does not stop authoritative movement");
+  });
+
+  it("holds a dropped player's seat and neutralizes movement during reconnection", async () => {
+    const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
+    const host: any = await colyseus.connectTo(room, { name: "HOST" });
+    const player = room.arena.players.find((value: any) => value.id === host.sessionId);
+    player.pendingInputs.push({ seq: 1 });
+    player.pendingFires.push({ seq: 1 });
+    player.lastInput = { ...player.lastInput, fwd:1, right:1, sprint:true, aiming:true };
+    let seconds = 0;
+    room.allowReconnection = async (_client: any, duration: number) => { seconds = duration; };
+    room.onDrop(host);
+    assert.equal(seconds, 20);
+    assert.equal(player.pendingInputs.length, 0);
+    assert.equal(player.pendingFires.length, 0);
+    assert.equal(player.lastInput.fwd, 0);
+    assert.equal(player.lastInput.right, 0);
+    assert.equal(player.lastInput.aiming, false);
+  });
+
+  it("drops to heartbeat cadence after a round and ignores idle gameplay messages", async () => {
+    const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
+    const host = await colyseus.connectTo(room, { name: "HOST" });
+    await colyseus.connectTo(room, { name: "GUEST" });
+    await host.request("start", {});
+    assert.equal(room.patchRate, 50);
+    room.arena.endsAt = Date.now() - 1;
+    await wait(80);
+    assert.equal(room.arena.phase, "finished");
+    assert.equal(room.patchRate, 1000);
+    const player = room.arena.players.find((value: any) => value.id === host.sessionId);
+    const queued = player.pendingInputs.length;
+    host.send("i", inputPacket(999));
+    host.send("f", firePacket(999, room.arena.tick));
+    host.send("a", {kind:"reload",seq:999});
+    await wait(40);
+    assert.equal(player.pendingInputs.length, queued);
+    assert.equal(player.pendingFires.length, 0);
+    assert.notEqual(player.ack, 999);
   });
 
   it("keeps shots, damage, kills, scores, and ammunition authoritative", async () => {
