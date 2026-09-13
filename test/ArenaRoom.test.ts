@@ -202,4 +202,29 @@ describe("BLOCKRIFT realtime room", () => {
     const shotEvents = updated.room.events.filter((event: any) => event.type === "shot");
     assert.ok(shotEvents.length > 0 && shotEvents.every((event: any) => event.weaponId === "AR-30"), "remote muzzle and tracer VFX receive the authoritative weapon identity");
   });
+
+  it("lets TDM shots pass through teammates without friendly damage", async () => {
+    const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "tdm" });
+    const host = await colyseus.connectTo(room, { name: "SHOOTER" });
+    const friendly = await colyseus.connectTo(room, { name: "FRIENDLY" });
+    const hostile = await colyseus.connectTo(room, { name: "HOSTILE" });
+    await host.request("start", {});
+    const shooter = room.arena.players.find((player: any) => player.id === host.sessionId);
+    const teammate = room.arena.players.find((player: any) => player.id === friendly.sessionId);
+    const enemy = room.arena.players.find((player: any) => player.id === hostile.sessionId);
+    shooter.team = teammate.team = 0; enemy.team = 1;
+    shooter.pose = { ...shooter.pose, x: 0, y: 0, z: 12, yaw: 0, pitch: 0 };
+    teammate.pose = { ...teammate.pose, x: 0, y: 0, z: 10, yaw: Math.PI, pitch: 0 };
+    enemy.pose = { ...enemy.pose, x: 0, y: 0, z: 8, yaw: Math.PI, pitch: 0 };
+    for (const player of [shooter, teammate, enemy]) player.history = [{ tick: room.arena.tick, at: Date.now(), pose: { ...player.pose } }];
+    shooter.fireCredit = 1000; shooter.fireAt = Date.now(); shooter.lastInput.aiming = true;
+    for (let seq = 1; seq <= 4; seq++) host.send("f", firePacket(seq, room.arena.tick));
+    await wait();
+    assert.equal(teammate.hp, 100);
+    assert.equal(teammate.deaths, 0);
+    assert.equal(enemy.alive, false);
+    assert.equal(enemy.deaths, 1);
+    assert.equal(shooter.kills, 1);
+    assert.ok(!room.arena.events.some((event: any) => event.type === "hit" && event.target === teammate.id));
+  });
 });

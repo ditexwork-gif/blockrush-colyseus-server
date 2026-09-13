@@ -221,7 +221,7 @@ function aimDirection(yaw, pitch) {
 }
 
 function damagePlayer(arena, player, target, damage, head, now, action = {}, end = target.pose) {
-  if (!target.alive) return;
+  if (!target.alive || (target.id !== player.id && arena.mode === "tdm" && target.team === player.team)) return;
   const weaponId = action.weaponId || gunsFor(player)[player.weapon].id;
   target.hp = Math.max(0, target.hp - damage);
   target.lastDamage = now;
