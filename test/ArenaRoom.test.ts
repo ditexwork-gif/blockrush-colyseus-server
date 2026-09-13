@@ -179,5 +179,7 @@ describe("BLOCKRIFT realtime room", () => {
     assert.equal(updated.room.self.ammo[0], 26);
     assert.ok(updated.room.events.some((event: any) => event.type === "kill" && event.weaponId === "AR-30"));
     assert.ok(updated.room.events.filter((event: any) => event.type === "hit").every((event: any) => event.weaponId === "AR-30" && Number.isInteger(event.actionSeq)));
+    const shotEvents = updated.room.events.filter((event: any) => event.type === "shot");
+    assert.ok(shotEvents.length > 0 && shotEvents.every((event: any) => event.weaponId === "AR-30"), "remote muzzle and tracer VFX receive the authoritative weapon identity");
   });
 });

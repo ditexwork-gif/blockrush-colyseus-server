@@ -321,7 +321,7 @@ function shoot(arena, player, action, now) {
       player: player.id,
       origin,
       end: { x: origin.x + normalized.x * 5, y: origin.y + normalized.y * 5, z: origin.z + normalized.z * 5 },
-      weapon: player.weapon,
+      weaponId: weapon.id,
       actionSeq: action.seq
     });
     return;
@@ -364,7 +364,7 @@ function shoot(arena, player, action, now) {
       player: player.id,
       origin,
       end: { x: origin.x + ray.x * distance, y: origin.y + ray.y * distance, z: origin.z + ray.z * distance },
-      weapon: player.weapon,
+      weaponId: weapon.id,
       actionSeq: action.seq
     });
   }
