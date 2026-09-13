@@ -72,6 +72,26 @@ describe("BLOCKRIFT realtime room", () => {
     assert.equal(new Set([...first.state.players.keys()]).size, 6, "replacement bot ids stay unique");
   });
 
+  it("lists public rooms without exposing private rooms", async () => {
+    const publicRoom: any = await colyseus.createRoom("blockrush", { map: "depot", mode: "tdm", public: true });
+    await colyseus.connectTo(publicRoom, { name: "PUBLIC" });
+    const privateRoom: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa", public: false });
+    await colyseus.connectTo(privateRoom, { name: "PRIVATE" });
+    const response: any = await colyseus.http.get("/rooms");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.data.region, "FRA");
+    assert.equal(response.data.rooms.length, 1);
+    assert.equal(response.data.rooms[0].roomId, publicRoom.roomId);
+    assert.equal(response.data.rooms[0].map, "depot");
+    assert.equal(response.data.rooms[0].mode, "tdm");
+    assert.equal(response.data.rooms[0].phase, "waiting");
+    publicRoom.beginMatch(Date.now(), true);
+    await wait(40);
+    const active: any = await colyseus.http.get("/rooms");
+    assert.equal(active.data.rooms[0].phase, "playing");
+    assert.ok(!JSON.stringify(active.data).includes(privateRoom.roomId));
+  });
+
   it("exposes room and fixed-tick performance metrics", async () => {
     const room = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa", public: false });
     await colyseus.connectTo(room, { name: "METRICS" });

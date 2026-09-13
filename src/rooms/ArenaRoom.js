@@ -455,7 +455,7 @@ export class ArenaRoom extends Room {
     const map = ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
     const mode = ["ffa", "tdm", "gun"].includes(options?.mode) ? options.mode : "ffa";
     const publicRoom = options?.public === true;
-    this.metadata = { map, mode, public: publicRoom };
+    this.metadata = { map, mode, public: publicRoom, phase: "waiting", region: "FRA" };
     this.arena = {
       code: this.roomId,
       map,
@@ -584,6 +584,7 @@ export class ArenaRoom extends Room {
     if (this.arena.tick % 120 === 0) this.pingClients(now);
     if (priorPhase !== this.arena.phase) {
       this.setTrafficMode(this.arena.phase);
+      void this.setMetadata({ ...this.metadata, phase: this.arena.phase });
       for (const player of this.arena.players) { player.pendingInputs.length=0; player.pendingFires.length=0; }
     }
     if (this.arena.phase === "playing" || priorPhase !== this.arena.phase || this.arena.tick % 60 === 0) {
@@ -741,6 +742,7 @@ export class ArenaRoom extends Room {
     this.arena.quickStartsAt=0;
     this.setTrafficMode("playing");
     this.arena.phase = "playing";
+    void this.setMetadata({ ...this.metadata, phase: "playing" });
     this.arena.round++;
     if(shouldFillBots)fillBots(this.arena,this.state,now);
     this.arena.endsAt = now + MATCH_MS;
