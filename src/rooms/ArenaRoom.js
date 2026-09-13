@@ -1,5 +1,5 @@
 import { Room } from "colyseus";
-import { ARENA_SOLIDS, DEPOT_SOLIDS, simulateMovement } from "../shared/movement.js";
+import { ARENA_SOLIDS, DEPOT_SOLIDS, NUKETOWN_SOLIDS, simulateMovement } from "../shared/movement.js";
 import { byId, damageAtRange } from "../shared/weapons.js";
 import { inputMessage, playerJoined, playerLeft, recordTick, roomCreated, roomDisposed } from "../metrics.js";
 import { ArenaState, NetEvent, PlayerNetState } from "./schema.js";
@@ -7,9 +7,10 @@ import { ArenaState, NetEvent, PlayerNetState } from "./schema.js";
 const LEGACY_GUNS = ["AR-30", "SR-6", "SMG-40"].map(serverWeapon);
 const SPAWNS = {
   foundry: [[-25,-9],[24,8],[-9,24],[9,-25],[-23,7],[24,-11],[8,24],[-8,-24]],
-  depot: [[-26,-23],[26,23],[-8,26],[8,-26],[-26,21],[26,-21],[-7,-2],[7,2]]
+  depot: [[-26,-23],[26,23],[-8,26],[8,-26],[-26,21],[26,-21],[-7,-2],[7,2]],
+  nuketown: [[-11.5,25],[11.5,-25],[-11.5,-22],[11.5,22],[-10,6],[10,-2],[-10,-5],[10,5]]
 };
-const WALLS = { foundry: ARENA_SOLIDS, depot: DEPOT_SOLIDS };
+const WALLS = { foundry: ARENA_SOLIDS, depot: DEPOT_SOLIDS, nuketown: NUKETOWN_SOLIDS };
 const ROOM_IDS = "$blockrush-room-ids";
 const ROOM_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MATCH_MS = 180_000;
@@ -452,7 +453,7 @@ export class ArenaRoom extends Room {
   async onCreate(options) {
     this.roomId = await this.generateRoomId();
     const now = Date.now();
-    const map = ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
+    const map = ["foundry", "depot", "nuketown"].includes(options?.map) ? options.map : "foundry";
     const mode = ["ffa", "tdm", "gun"].includes(options?.mode) ? options.mode : "ffa";
     const publicRoom = options?.public === true;
     this.metadata = { map, mode, public: publicRoom, phase: "waiting", region: "FRA" };
