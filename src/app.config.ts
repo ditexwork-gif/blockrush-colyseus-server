@@ -23,7 +23,7 @@ const server = defineServer({
             clients: room.clients,
             maxClients: room.maxClients,
             locked: room.locked,
-            map: ["foundry", "depot", "nuketown"].includes(room.metadata?.map) ? room.metadata.map : "foundry",
+            map: room.metadata?.map === "depot" ? "depot" : "foundry",
             mode: ["ffa", "tdm", "gun"].includes(room.metadata?.mode) ? room.metadata.mode : "ffa",
             phase: ["waiting", "playing", "finished"].includes(room.metadata?.phase) ? room.metadata.phase : "waiting"
           }))

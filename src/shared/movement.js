@@ -17,11 +17,6 @@ for(const x of [-21,21]){depotSolid(x,0,11,34,0,4.2);for(let i=0;i<10;i++)depotS
 for(const [x,z,w,d] of [[-8,-18,7,4],[8,18,7,4],[-7,12,4,7],[7,-12,4,7]])depotSolid(x,z,w,d,0,3.3);
 for(const [x,z] of [[-8,-4],[8,4],[-7,24],[7,-24]])depotSolid(x,z,2.2,2.2,0,2.2);
 
-export const NUKETOWN_SOLIDS=[];
-function nuketownSolid(x,z,w,d,bottom,top){NUKETOWN_SOLIDS.push({x,z,w,d,bottom,top})}
-nuketownSolid(0,0,31,61,-1.2,0);for(const x of [-15,15])nuketownSolid(x,0,1,61,0,4);for(const z of [-30,30])nuketownSolid(0,z,31,1,0,4);
-for(const [x,z,w,d,h] of [[-2.7,13.2,8.6,7.8,6.4],[4.1,8.8,4.8,5.2,4.5],[1,-14.3,8.5,7.2,6.2],[-4.3,-10.2,4.2,4.5,4],[-2.2,1.8,2.8,8.8,3.1],[3.6,-1.2,2.7,6.2,2.8],[10,-7,4,4,3]])nuketownSolid(x,z,w,d,0,h);
-
 const movementClamp=(value,min,max)=>Math.max(min,Math.min(max,value));
 function movementBlocked(x,z,r,y,h,solids){return solids.some(s=>s.top>y+.38&&s.bottom<y+h&&x+r>s.x-s.w/2&&x-r<s.x+s.w/2&&z+r>s.z-s.d/2&&z-r<s.z+s.d/2)}
 function movementFloorAt(x,z,y,solids){let floor=0;for(const s of solids)if(s.top<=y+.39&&x+.27>s.x-s.w/2&&x-.27<s.x+s.w/2&&z+.27>s.z-s.d/2&&z-.27<s.z+s.d/2)floor=Math.max(floor,s.top);return floor}
@@ -29,7 +24,7 @@ function movementAccelerate(state,wishX,wishZ,wishSpeed,accel,dt){const current=
 function movementFriction(state,friction,dt){const speed=Math.hypot(state.vx,state.vz);if(speed<.01){state.vx=state.vz=0;return}const scale=Math.max(speed-speed*friction*dt,0)/speed;state.vx*=scale;state.vz*=scale}
 
 export function simulateMovement(previous,input,dt){
- const state={...previous,x:Number(previous.x)||0,y:Number(previous.y)||0,z:Number(previous.z)||0,vx:Number(previous.vx)||0,vy:Number(previous.vy)||0,vz:Number(previous.vz)||0,grounded:previous.grounded!==false,slide:Number(previous.slide)||0,slideCooldown:Number(previous.slideCooldown)||0,slideQueued:!!previous.slideQueued,landedAt:Number.isFinite(previous.landedAt)?previous.landedAt:-99,time:Number(previous.time)||0},solids=Array.isArray(input.solids)?input.solids:input.map==='depot'?DEPOT_SOLIDS:input.map==='nuketown'?NUKETOWN_SOLIDS:ARENA_SOLIDS;dt=movementClamp(Number(dt)||0,0,.05);state.time+=dt;state.slide=Math.max(0,state.slide-dt);state.slideCooldown=Math.max(0,state.slideCooldown-dt);
+ const state={...previous,x:Number(previous.x)||0,y:Number(previous.y)||0,z:Number(previous.z)||0,vx:Number(previous.vx)||0,vy:Number(previous.vy)||0,vz:Number(previous.vz)||0,grounded:previous.grounded!==false,slide:Number(previous.slide)||0,slideCooldown:Number(previous.slideCooldown)||0,slideQueued:!!previous.slideQueued,landedAt:Number.isFinite(previous.landedAt)?previous.landedAt:-99,time:Number(previous.time)||0},solids=Array.isArray(input.solids)?input.solids:input.map==='depot'?DEPOT_SOLIDS:ARENA_SOLIDS;dt=movementClamp(Number(dt)||0,0,.05);state.time+=dt;state.slide=Math.max(0,state.slide-dt);state.slideCooldown=Math.max(0,state.slideCooldown-dt);
  let forward=movementClamp(Number(input.fwd)||0,-1,1),right=movementClamp(Number(input.right)||0,-1,1);const inputLength=Math.hypot(forward,right);if(inputLength>1){forward/=inputLength;right/=inputLength}
  const yaw=Number.isFinite(input.yaw)?input.yaw:0,speed=movementClamp(Number(input.speed)||8.2,4,12),base=speed*(input.sprint?1.38:1)*(input.aiming?.65:1);let wishX=-Math.sin(yaw)*forward+Math.cos(yaw)*right,wishZ=-Math.cos(yaw)*forward-Math.sin(yaw)*right;const wishLength=Math.hypot(wishX,wishZ);if(wishLength>0){wishX/=wishLength;wishZ/=wishLength}
  if(input.slidePressed){if(!state.grounded)state.slideQueued=true;else if(state.slideCooldown<=0){const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,speed*MOVE.softCap);state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}

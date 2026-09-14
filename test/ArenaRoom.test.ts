@@ -54,15 +54,6 @@ describe("BLOCKRIFT realtime room", () => {
     assert.equal("pose" in player, false);
   });
 
-  it("accepts Nuketown as a normal authoritative multiplayer arena", async () => {
-    const room: any = await colyseus.createRoom("blockrush", { map: "nuketown", mode: "ffa", public: false });
-    const host = await colyseus.connectTo(room, { name: "MAP TEST" });
-    const waiting = await host.request("snapshot", {});
-    assert.equal(waiting.room.map, "nuketown");
-    const player = room.arena.players.find((value: any) => value.id === host.sessionId);
-    assert.ok(Math.abs(player.pose.x) <= 12 && Math.abs(player.pose.z) <= 25);
-  });
-
   it("fills a compatible public room through Quick Play", async () => {
     const options = { map: "foundry", mode: "ffa", public: true, name: "QUICK" };
     const first: any = await colyseus.sdk.joinOrCreate("blockrush", options);
