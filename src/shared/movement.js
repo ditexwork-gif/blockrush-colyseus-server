@@ -32,7 +32,48 @@ export function simulateMovement(previous,input,dt){
  if(state.grounded){if(!(input.jump&&justLanded))movementFriction(state,sliding?MOVE.slideFriction:MOVE.groundFriction,dt);if(!sliding&&wishLength>0)movementAccelerate(state,wishX,wishZ,base,MOVE.groundAccel,dt)}else if(wishLength>0)movementAccelerate(state,wishX,wishZ,Math.min(base,MOVE.airCap),MOVE.airAccel,dt);
  let horizontalSpeed=Math.hypot(state.vx,state.vz),cap=speed*MOVE.softCap;if(horizontalSpeed>cap){state.vx*=cap/horizontalSpeed;state.vz*=cap/horizontalSpeed}
  if(input.jump&&state.grounded){state.vy=MOVE.jumpVel;state.grounded=false;if(sliding){state.slide=0;state.vx*=MOVE.slideJumpKeep;state.vz*=MOVE.slideJumpKeep;sliding=false}}
- const height=state.slide>0?1.2:1.8,dx=state.vx*dt,dz=state.vz*dt;if(!movementBlocked(state.x+dx,state.z,.33,state.y,height,solids))state.x+=dx;else state.vx=0;if(!movementBlocked(state.x,state.z+dz,.33,state.y,height,solids))state.z+=dz;else state.vz=0;state.x=movementClamp(state.x,-29,29);state.z=movementClamp(state.z,-29,29);
- const oldY=state.y;state.vy=(Number(state.vy)||0)-MOVE.gravity*dt;state.y+=state.vy*dt;const floor=movementFloorAt(state.x,state.z,oldY,solids);if(state.y<=floor){if(!state.grounded)state.landedAt=state.time;state.y=floor;state.vy=0;state.grounded=true;if(state.slideQueued&&state.slideCooldown<=0){state.slideQueued=false;const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,speed*MOVE.softCap);state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}else state.grounded=false;
+ if(input.map==='custom'||input.geometryVersion===3)return moveGeometryV3(state,input,dt,solids);
+ const height=state.slide>0?1.2:1.8,dx=state.vx*dt,dz=state.vz*dt;if(!movementBlocked(state.x+dx,state.z,.33,state.y,height,solids))state.x+=dx;else state.vx=0;if(!movementBlocked(state.x,state.z+dz,.33,state.y,height,solids))state.z+=dz;else state.vz=0;const halfWidth=movementClamp(Number(input.bounds?.halfWidth)||29,10,100),halfDepth=movementClamp(Number(input.bounds?.halfDepth)||29,10,100);state.x=movementClamp(state.x,-halfWidth,halfWidth);state.z=movementClamp(state.z,-halfDepth,halfDepth);
+ const oldY=state.y;state.vy=(Number(state.vy)||0)-MOVE.gravity*dt;state.y+=state.vy*dt;if(input.map==='custom' && state.vy>0){for(const solid of solids){if(solid.bottom>0 && oldY+height<=solid.bottom+.001 && state.y+height>solid.bottom && state.x+.33>solid.x-solid.w/2 && state.x-.33<solid.x+solid.w/2 && state.z+.33>solid.z-solid.d/2 && state.z-.33<solid.z+solid.d/2){state.y=Math.max(oldY,solid.bottom-height);state.vy=0;}}}const floor=movementFloorAt(state.x,state.z,oldY,solids);if(state.y<=floor){if(!state.grounded)state.landedAt=state.time;state.y=floor;state.vy=0;state.grounded=true;if(state.slideQueued&&state.slideCooldown<=0){state.slideQueued=false;const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,speed*MOVE.softCap);state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}else state.grounded=false;
+ return state;
+}
+
+// Geometry v3 is opt-in for custom arenas. Built-in multiplayer keeps its frozen
+// movement baseline until rooms explicitly load the same authored geometry.
+export const GEOMETRY_VERSION=3;
+export function colliderLocal(s,x,z){const a=s.yaw||0,c=Math.cos(a),n=Math.sin(a),dx=x-s.x,dz=z-s.z;return {x:c*dx-n*dz,z:n*dx+c*dz};}
+export function colliderContains(s,x,z,r=0){const p=colliderLocal(s,x,z);return Math.abs(p.x)<s.w/2+r-1e-7&&Math.abs(p.z)<s.d/2+r-1e-7;}
+export function colliderHeight(s,x,z){if(s.kind!=='ramp')return s.top;const p=colliderLocal(s,x,z),dir=s.dir||'N';let t=dir==='S'?(p.z/s.d+.5):dir==='E'?(p.x/s.w+.5):dir==='W'?(.5-p.x/s.w):(.5-p.z/s.d);return s.bottom+(s.top-s.bottom)*movementClamp(t,0,1);}
+export function rampWalkable(s){return s.kind!=='ramp'||Math.atan2(s.top-s.bottom,['E','W'].includes(s.dir)?s.w:s.d)<=40*Math.PI/180+1e-7;}
+export function collisionFloor(x,z,y,solids,r=.27,step=.001){let floor=0;for(const s of solids){if(!colliderContains(s,x,z,r)||!rampWalkable(s))continue;const top=colliderHeight(s,x,z);if(top<=y+step)floor=Math.max(floor,top);}return floor;}
+export function collisionBlocked(x,z,r,y,h,solids){return solids.some(s=>colliderContains(s,x,z,r)&&s.bottom<y+h-1e-6&&(rampWalkable(s)?colliderHeight(s,x,z):s.top)>y+.001);}
+function moveGeometryV3(state,input,dt,solids){
+ const height=state.slide>0?1.2:1.8,r=.33,steps=Math.max(1,Math.ceil(Math.hypot(state.vx,state.vz)*dt/.15));
+ const attempt=(dx,dz)=>{
+  let x=state.x+dx,z=state.z+dz,y=state.y;
+  const hits=solids.filter(s=>colliderContains(s,x,z,r)&&s.bottom<y+height-1e-6&&(rampWalkable(s)?colliderHeight(s,x,z):s.top)>y+.001);
+  if(hits.length){
+   const top=Math.max(...hits.map(s=>rampWalkable(s)?colliderHeight(s,x,z):Infinity));
+   if(state.grounded&&top-y<=.550001&&!collisionBlocked(x,z,r,top,height,solids))y=top;
+   else return false;
+  }
+  state.x=x;state.z=z;state.y=y;return true;
+ };
+ for(let i=0;i<steps;i++){
+  const dx=state.vx*dt/steps,dz=state.vz*dt/steps;
+  if(!attempt(dx,dz)){
+   // Project along a rotated face before axis fallback, so oblique walls do not snag.
+   const obstacle=solids.find(s=>s.yaw&&colliderContains(s,state.x+dx,state.z+dz,r)&&s.bottom<state.y+height&&s.top>state.y+.55);
+   if(obstacle){const p=colliderLocal(obstacle,state.x,state.z),nx=Math.abs(p.x)/(obstacle.w/2+r)>Math.abs(p.z)/(obstacle.d/2+r)?Math.sign(p.x):0,nz=nx?0:Math.sign(p.z),c=Math.cos(obstacle.yaw),n=Math.sin(obstacle.yaw),wx=c*nx+n*nz,wz=-n*nx+c*nz,dot=state.vx*wx+state.vz*wz;if(dot<0){state.vx-=dot*wx;state.vz-=dot*wz;}if(attempt(state.vx*dt/steps,state.vz*dt/steps))continue;}
+   if(!attempt(dx,0))state.vx=0;if(!attempt(0,dz))state.vz=0;
+  }
+ }
+ const hw=movementClamp(Number(input.bounds?.halfWidth)||29,10,100),hd=movementClamp(Number(input.bounds?.halfDepth)||29,10,100);state.x=movementClamp(state.x,-hw,hw);state.z=movementClamp(state.z,-hd,hd);
+ const oldY=state.y;state.vy-=MOVE.gravity*dt;state.y+=state.vy*dt;
+ if(state.vy>0)for(const s of solids){if(s.kind==='ramp'||!colliderContains(s,state.x,state.z,r))continue;if(oldY+height<=s.bottom+.001&&state.y+height>s.bottom){state.y=s.bottom-height;state.vy=0;}}
+ const floor=collisionFloor(state.x,state.z,oldY,solids,.33,state.grounded?.55:.001);
+ if(state.y<=floor){if(!state.grounded)state.landedAt=state.time;state.y=floor;state.vy=0;state.grounded=true;
+  if(state.slideQueued&&state.slideCooldown<=0){state.slideQueued=false;const speed=Math.hypot(state.vx,state.vz);if(speed>=2){const boosted=Math.min(speed*MOVE.slideBoost,(Number(input.speed)||8.2)*MOVE.softCap);state.vx*=boosted/speed;state.vz*=boosted/speed;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown;}}
+ }else state.grounded=false;
  return state;
 }
