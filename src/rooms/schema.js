@@ -5,7 +5,7 @@ export const PlayerNetState = schema({
   x: t.int16(0), y: t.int16(0), z: t.int16(0),
   vx: t.int16(0), vy: t.int16(0), vz: t.int16(0),
   yawQ: t.int8(0), pitchQ: t.int8(0),
-  hp: t.uint8(100), flags: t.uint8(3), weapon: t.uint8(0), team: t.uint8(0), gunStage: t.uint8(0),
+  hp: t.uint8(100), flags: t.uint8(3), weapon: t.uint8(0), team: t.uint8(0), classIndex: t.uint8(0), gunStage: t.uint8(0),
   kills: t.uint16(0), deaths: t.uint16(0), life: t.uint16(0), score: t.uint32(0),
   lastSeq: t.uint32(0), lastActionSeq: t.uint32(0), respawnIn: t.uint16(0),
   ammo0: t.uint8(0), ammo1: t.uint8(0)

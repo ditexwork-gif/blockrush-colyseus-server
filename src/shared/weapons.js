@@ -19,6 +19,7 @@ export const WEAPONS=[
   "price": 0,
   "color": 14483289,
   "rig": "ar",
+  "animClass": "rifle",
   "name": "AR-30"
  },
  {
@@ -41,6 +42,7 @@ export const WEAPONS=[
   "price": 0,
   "color": 6804945,
   "rig": "smg",
+  "animClass": "rifle",
   "name": "SMG-40"
  },
  {
@@ -63,6 +65,7 @@ export const WEAPONS=[
   "price": 0,
   "color": 15971951,
   "rig": "sniper",
+  "animClass": "rifle",
   "name": "SR-6"
  },
  {
@@ -85,6 +88,7 @@ export const WEAPONS=[
   "price": 0,
   "color": 13226966,
   "rig": "pistol",
+  "animClass": "pistol",
   "name": "P-9"
  },
  {
@@ -107,6 +111,7 @@ export const WEAPONS=[
   "price": 600,
   "color": 14711375,
   "rig": "shotgun",
+  "animClass": "rifle",
   "name": "SG-8"
  },
  {
@@ -129,6 +134,7 @@ export const WEAPONS=[
   "price": 800,
   "color": 10475775,
   "rig": "smg",
+  "animClass": "rifle",
   "name": "MP-25"
  },
  {
@@ -151,6 +157,7 @@ export const WEAPONS=[
   "price": 1000,
   "color": 12118406,
   "rig": "ar",
+  "animClass": "rifle",
   "name": "CR-24",
   "burst": 3,
   "burstDelay": 0.045
@@ -175,6 +182,7 @@ export const WEAPONS=[
   "price": 1200,
   "color": 15782522,
   "rig": "dmr",
+  "animClass": "rifle",
   "name": "DMR-10"
  },
  {
@@ -197,6 +205,7 @@ export const WEAPONS=[
   "price": 900,
   "color": 14201994,
   "rig": "revolver",
+  "animClass": "pistol",
   "name": "HV-45"
  },
  {
@@ -219,6 +228,7 @@ export const WEAPONS=[
   "price": 1600,
   "color": 9413530,
   "rig": "lmg",
+  "animClass": "rifle",
   "name": "LM-100"
  },
  {
@@ -241,6 +251,7 @@ export const WEAPONS=[
   "price": 1500,
   "color": 15899243,
   "rig": "shotgun",
+  "animClass": "rifle",
   "name": "AS-12",
   "auto": true
  },
@@ -264,6 +275,7 @@ export const WEAPONS=[
   "price": 1800,
   "color": 13025512,
   "rig": "ar",
+  "animClass": "rifle",
   "name": "BR-20"
  },
  {
@@ -286,6 +298,7 @@ export const WEAPONS=[
   "price": 2400,
   "color": 16757671,
   "rig": "sniper",
+  "animClass": "rifle",
   "name": "SR-2",
   "heavy": true
  },
@@ -309,6 +322,7 @@ export const WEAPONS=[
   "price": 2800,
   "color": 8376480,
   "rig": "launcher",
+  "animClass": "rifle",
   "name": "GL-3",
   "projectile": {
    "speed": 28,
@@ -337,6 +351,7 @@ export const WEAPONS=[
   "price": 3500,
   "color": 13804799,
   "rig": "rail",
+  "animClass": "rifle",
   "name": "LZ-7",
   "charge": 0.55,
   "pierce": true

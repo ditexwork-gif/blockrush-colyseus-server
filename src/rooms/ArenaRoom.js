@@ -87,6 +87,7 @@ function makePlayer(arena, id, name, now) {
     score: 0,
     weapon: 0,
     team: arena.players.length % 2,
+    classIndex: 0,
     gunStage: 0,
     sniperKills: 0
   };
@@ -110,7 +111,7 @@ function makePlayer(arena, id, name, now) {
 function makeBot(arena, now) {
   const index=arena.botSerial++;
   const bot=makePlayer(arena,`BOT-${index}-${arena.round}`,BOT_NAMES[index%BOT_NAMES.length],now);
-  bot.bot=true;bot.botSeed=index*1.731+arena.round;bot.nextBotFire=now+700+(index%6)*110;
+  bot.bot=true;bot.classIndex=index%5;bot.botSeed=index*1.731+arena.round;bot.nextBotFire=now+700+(index%6)*110;
   return bot;
 }
 
@@ -169,6 +170,7 @@ function publicRoom(arena, now, player) {
       weapon: value.weapon,
       team: value.team,
       gunStage: value.gunStage,
+      classIndex: value.classIndex,
       sniperKills: value.sniperKills,
       respawnAt: value.respawnAt
     }))
@@ -418,6 +420,7 @@ function applyActions(arena, player, body, now) {
         Array.isArray(action.ids) && action.ids.length === 2 &&
         byId[action.ids[0]]?.slot === "primary" && byId[action.ids[1]]?.slot === "secondary") {
       player.gunIds = action.ids;
+      if(Number.isInteger(action.classIndex))player.classIndex=clamp(action.classIndex,0,4);
       player.loadoutSet = true;
       player.ammo = gunsFor(player).map(weapon => weapon.cap);
       player.weapon = 0;
@@ -495,6 +498,7 @@ export class ArenaRoom extends Room {
       if(bot){this.arena.players=this.arena.players.filter(value=>value!==bot);this.state.players.delete(bot.id)}
     }
     const player = makePlayer(this.arena, client.sessionId, options?.name, now);
+    player.classIndex=clamp(Math.floor(Number(options?.classIndex)||0),0,4);
     this.arena.players.push(player);
     if (!this.arena.hostId) this.arena.hostId = player.id;
     this.arena.revision++;
@@ -724,7 +728,7 @@ export class ArenaRoom extends Room {
       net.name=player.name; net.bot=!!player.bot; net.x=q(p.x); net.y=q(p.y); net.z=q(p.z); net.vx=q(p.vx); net.vy=q(p.vy); net.vz=q(p.vz);
       net.yawQ=clamp(Math.round(angleDelta(p.yaw,0)/Math.PI*127),-127,127); net.pitchQ=clamp(Math.round((p.pitch||0)/1.45*127),-127,127);
       net.hp=clamp(Math.round(player.hp),0,100); net.flags=(player.alive?1:0)|(p.grounded?2:0)|(p.slide?4:0)|(player.lastInput?.aiming?8:0)|(player.reloadEnd?16:0);
-      net.weapon=player.weapon; net.team=player.team; net.gunStage=player.gunStage; net.kills=player.kills; net.deaths=player.deaths; net.life=player.life; net.score=player.score;
+      net.weapon=player.weapon; net.team=player.team; net.classIndex=player.classIndex; net.gunStage=player.gunStage; net.kills=player.kills; net.deaths=player.deaths; net.life=player.life; net.score=player.score;
       net.lastSeq=player.ackInput; net.lastActionSeq=player.ack; net.respawnIn=player.alive?0:clamp(Math.ceil((player.respawnAt-now)/TICK_MS),0,65535);
       net.ammo0=clamp(player.ammo?.[0]||0,0,255); net.ammo1=clamp(player.ammo?.[1]||0,0,255);
     }

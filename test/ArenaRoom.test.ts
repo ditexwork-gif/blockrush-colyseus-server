@@ -34,13 +34,14 @@ describe("BLOCKRIFT realtime room", () => {
     assert.equal(waiting.room.hostId, host.sessionId);
     await assert.rejects(host.request("start", {}), /Invite at least one friend/);
 
-    const guest = await colyseus.connectTo(room, { name: "<BETA>" });
+    const guest = await colyseus.connectTo(room, { name: "<BETA>", classIndex: 3 });
     const started = await host.request("start", {});
     assert.equal(started.room.phase, "playing");
     assert.equal(started.room.round, 1);
     assert.equal(started.room.players.length, 2);
     assert.notEqual(started.room.players[0].team, started.room.players[1].team);
     assert.equal(started.room.players.find((player: any) => player.id === guest.sessionId).name, "BETA");
+    assert.equal(started.room.players.find((player: any) => player.id === guest.sessionId).classIndex, 3);
   });
 
   it("packs authoritative state into one 20 Hz schema stream", async () => {
