@@ -418,7 +418,7 @@ export const WEAPONS=[
  }
 ];
 // A separate test entry. No existing weapon data or default class is replaced.
-WEAPONS.splice(1,0,{...WEAPONS[0],range:[...WEAPONS[0].range],id:'test-01',name:'RIFT-01 (TEST)'});
+WEAPONS.splice(1,0,{...WEAPONS[0],range:[...WEAPONS[0].range],id:'test-01',name:'RIFT-01 (TEST)',adsDistance:.12});
 export const byId=Object.fromEntries(WEAPONS.map(w=>[w.id,w]));
 export const STARTERS=["AR-30","SMG-40","SR-6","P-9","test-01"];
 export function damageAtRange(w,d){const [full,end]=w.range;return end<=full?1:Math.max(0,Math.min(1,1-(d-full)/(end-full)))*.6+.4}
