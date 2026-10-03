@@ -417,10 +417,20 @@ export const WEAPONS=[
   "pierce": true
  }
 ];
-// A separate test entry. No existing weapon data or default class is replaced.
-WEAPONS.splice(1,0,{...WEAPONS[0],range:[...WEAPONS[0].range],id:'test-01',name:'RIFT-01 (TEST)',adsDistance:.12});
+// Cosmetic alternatives inherit the complete gameplay data of their class.
+// Original weapons and default classes stay intact; only test-01 is superseded.
+export const MESHY_REFERENCES=Object.freeze({
+ 'rift-01':'AR-30','rift-02':'AR-30','rift-03':'SMG-40','rift-04':'SMG-40',
+ 'rift-05':'P-9','rift-06':'SG-8','rift-07':'HV-45','rift-08':'SG-8',
+ 'rift-09':'SR-6','rift-10':'SR-6','rift-11':'LM-100','rift-12':'LM-100'
+});
+const originals=[...WEAPONS];
+WEAPONS.splice(0,WEAPONS.length,...originals.flatMap(original=>[original,...Object.entries(MESHY_REFERENCES).filter(([,reference])=>reference===original.id).map(([id])=>({
+ ...original,range:[...original.range],id,name:id.toUpperCase(),level:1,price:0,
+ ...(['rift-01','rift-02','rift-04'].includes(id)?{adsDistance:.12}:{})
+}))]));
 export const byId=Object.fromEntries(WEAPONS.map(w=>[w.id,w]));
-export const STARTERS=["AR-30","SMG-40","SR-6","P-9","test-01"];
+export const STARTERS=["AR-30","SMG-40","SR-6","P-9",...Object.keys(MESHY_REFERENCES)];
 export function damageAtRange(w,d){const [full,end]=w.range;return end<=full?1:Math.max(0,Math.min(1,1-(d-full)/(end-full)))*.6+.4}
 function selectedLoadout(p){return p.classes?.[p.selectedClass]||p.loadout||{}}
 export function cardState(p,w){return p.level<w.level?"locked":p.unlocks.includes(w.id)?(selectedLoadout(p)[w.slot]===w.id?"equipped":"owned"):p.coins>=w.price?"affordable":"expensive"}
