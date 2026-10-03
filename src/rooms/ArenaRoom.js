@@ -684,7 +684,7 @@ export class ArenaRoom extends Room {
     if (!player.alive || this.arena.phase !== "playing") return;
     const q = player.pendingInputs, count = Math.min(q.length, q.length > 6 ? 3 : 1);
     if (!count) {
-      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, map:this.arena.map };
+      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map };
       player.pose = simulateMovement(player.pose, held, TICK);
     }
     for (let index=0; index<count; index++) {
@@ -692,7 +692,7 @@ export class ArenaRoom extends Room {
       if (Number.isInteger(input.weapon) && gunsFor(player)[input.weapon] && input.weapon !== player.weapon && this.arena.mode !== "gun") {
         player.weapon = input.weapon; player.reloadEnd = 0; player.swapUntil = now + 350;
       }
-      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, map:this.arena.map };
+      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map };
       const before = player.pose;
       for (let step=0; step<input.dtTicks; step++) player.pose = simulateMovement(player.pose, { ...clean, jump:step===0&&clean.jump, slidePressed:step===0&&clean.slidePressed }, TICK);
       if (![player.pose.x,player.pose.y,player.pose.z,player.pose.vx,player.pose.vy,player.pose.vz].every(Number.isFinite)) { player.pose=before; player.strikes++; }

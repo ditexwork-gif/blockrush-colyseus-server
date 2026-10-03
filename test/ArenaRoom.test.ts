@@ -118,6 +118,24 @@ describe("BLOCKRIFT realtime room", () => {
     assert.ok(updated.room.players.find((player: any) => player.id === host.sessionId).pose.z < before);
   });
 
+  it("uses authoritative per-weapon ADS movement for queued and held inputs", async () => {
+    const room: any = await colyseus.createRoom("blockrush", { map:"foundry", mode:"ffa" });
+    const host=await colyseus.connectTo(room,{name:"HOST"});
+    await colyseus.connectTo(room,{name:"GUEST"});await host.request("start",{});
+    const player=room.arena.players.find((p: any)=>p.id===host.sessionId);
+    for(const [id,speed,mult] of [["AR-30",8.2,.8],["P-9",9.8,.95],["SMG-40",9.5,.9],["SR-6",7.4,.5]] as const){
+      player.gunIds=[id,"P-9"];player.weapon=0;
+      player.pose={...player.pose,x:25,y:0,z:0,vx:0,vy:0,vz:0,grounded:true,slide:0};
+      for(let seq=1;seq<=60;seq++){
+        player.pendingInputs=[{seq,dtTicks:1,fwd:1,right:0,yaw:0,pitch:0,weapon:0,aiming:true,adsMoveMult:99}];
+        room.stepPlayer(player,Date.now());
+      }
+      assert.ok(Math.abs(Math.hypot(player.pose.vx,player.pose.vz)-speed*mult)<1e-8,`${id} ignores fabricated ADS speed`);
+      player.pendingInputs=[];room.stepPlayer(player,Date.now());
+      assert.ok(Math.abs(Math.hypot(player.pose.vx,player.pose.vz)-speed*mult)<1e-8,`${id} holds authoritative ADS speed on a packet gap`);
+    }
+  });
+
   it("drains a burst of inputs without leaving the client in permanent replay", async () => {
     const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
     const host = await colyseus.connectTo(room, { name: "HOST" });

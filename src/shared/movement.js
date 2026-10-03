@@ -23,10 +23,18 @@ function movementFloorAt(x,z,y,solids){let floor=0;for(const s of solids)if(s.to
 function movementAccelerate(state,wishX,wishZ,wishSpeed,accel,dt){const current=state.vx*wishX+state.vz*wishZ,add=wishSpeed-current;if(add<=0)return;const amount=Math.min(accel*dt*wishSpeed,add);state.vx+=wishX*amount;state.vz+=wishZ*amount}
 function movementFriction(state,friction,dt){const speed=Math.hypot(state.vx,state.vz);if(speed<.01){state.vx=state.vz=0;return}const scale=Math.max(speed-speed*friction*dt,0)/speed;state.vx*=scale;state.vz*=scale}
 
+/**
+ * Advance movement from the previous pose/velocity state. Online callers use 1/60 s.
+ * input: fwd/right [-1,1], yaw (radians), speed (m/s), jump, slidePressed,
+ * sprint, aiming, map, optional solids and geometryVersion.
+ * Custom bounds MUST be {halfWidth, halfDepth}, in metres. A number or
+ * {width, depth} does not supply these fields and falls back to ±29 m.
+ * Returns a new state; does not mutate the input or previous state.
+ */
 export function simulateMovement(previous,input,dt){
  const state={...previous,x:Number(previous.x)||0,y:Number(previous.y)||0,z:Number(previous.z)||0,vx:Number(previous.vx)||0,vy:Number(previous.vy)||0,vz:Number(previous.vz)||0,grounded:previous.grounded!==false,slide:Number(previous.slide)||0,slideCooldown:Number(previous.slideCooldown)||0,slideQueued:!!previous.slideQueued,landedAt:Number.isFinite(previous.landedAt)?previous.landedAt:-99,time:Number(previous.time)||0},solids=Array.isArray(input.solids)?input.solids:input.map==='depot'?DEPOT_SOLIDS:ARENA_SOLIDS;dt=movementClamp(Number(dt)||0,0,.05);state.time+=dt;state.slide=Math.max(0,state.slide-dt);state.slideCooldown=Math.max(0,state.slideCooldown-dt);
  let forward=movementClamp(Number(input.fwd)||0,-1,1),right=movementClamp(Number(input.right)||0,-1,1);const inputLength=Math.hypot(forward,right);if(inputLength>1){forward/=inputLength;right/=inputLength}
- const yaw=Number.isFinite(input.yaw)?input.yaw:0,speed=movementClamp(Number(input.speed)||8.2,4,12),base=speed*(input.sprint?1.38:1)*(input.aiming?.65:1);let wishX=-Math.sin(yaw)*forward+Math.cos(yaw)*right,wishZ=-Math.cos(yaw)*forward-Math.sin(yaw)*right;const wishLength=Math.hypot(wishX,wishZ);if(wishLength>0){wishX/=wishLength;wishZ/=wishLength}
+ const yaw=Number.isFinite(input.yaw)?input.yaw:0,speed=movementClamp(Number(input.speed)||8.2,4,12),base=speed*(input.sprint?1.38:1)*(input.aiming?movementClamp(Number(input.adsMoveMult)||.65,.1,1):1);let wishX=-Math.sin(yaw)*forward+Math.cos(yaw)*right,wishZ=-Math.cos(yaw)*forward-Math.sin(yaw)*right;const wishLength=Math.hypot(wishX,wishZ);if(wishLength>0){wishX/=wishLength;wishZ/=wishLength}
  if(input.slidePressed){if(!state.grounded)state.slideQueued=true;else if(state.slideCooldown<=0){const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,speed*MOVE.softCap);state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}
  let sliding=state.slide>0;const justLanded=state.grounded&&state.time-(Number(state.landedAt)||-99)<MOVE.bhopWindow;
  if(state.grounded){if(!(input.jump&&justLanded))movementFriction(state,sliding?MOVE.slideFriction:MOVE.groundFriction,dt);if(!sliding&&wishLength>0)movementAccelerate(state,wishX,wishZ,base,MOVE.groundAccel,dt)}else if(wishLength>0)movementAccelerate(state,wishX,wishZ,Math.min(base,MOVE.airCap),MOVE.airAccel,dt);
