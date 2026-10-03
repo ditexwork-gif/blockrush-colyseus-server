@@ -191,6 +191,23 @@ describe("BLOCKRIFT realtime room", () => {
     assert.notEqual(player.ack, 999);
   });
 
+  it("accepts the extra test rifle and reports its real identity in authoritative combat", async () => {
+    const room: any = await colyseus.createRoom("blockrush", {map:"foundry",mode:"ffa"});
+    const host=await colyseus.connectTo(room,{name:"TESTER"});
+    const guest=await colyseus.connectTo(room,{name:"TARGET"});await host.request("start",{});
+    host.send("a",{kind:"loadout",seq:1,ids:["test-01","P-9"],classIndex:0});await wait(40);
+    const shooter=room.arena.players.find((p: any)=>p.id===host.sessionId),target=room.arena.players.find((p: any)=>p.id===guest.sessionId);
+    assert.deepEqual(shooter.gunIds,["test-01","P-9"]);assert.equal(shooter.ammo[0],30);
+    shooter.pose={...shooter.pose,x:0,y:0,z:12,yaw:0,pitch:0};target.pose={...target.pose,x:0,y:0,z:10,yaw:Math.PI,pitch:0};
+    for(const player of [shooter,target])player.history=[{tick:room.arena.tick,at:Date.now(),pose:{...player.pose}}];
+    shooter.fireCredit=1000;shooter.fireAt=Date.now();shooter.lastInput.aiming=true;
+    for(let seq=1;seq<=4;seq++)host.send("f",firePacket(seq,room.arena.tick));await wait();
+    assert.equal(shooter.kills,1);assert.equal(target.alive,false);assert.equal(shooter.ammo[0],26);
+    assert(room.arena.events.some((e: any)=>e.type==="kill"&&e.weaponId==="test-01"));
+    assert(room.arena.events.filter((e: any)=>e.type==="shot").every((e: any)=>e.weaponId==="test-01"));
+    assert.equal(room.patchRate,50,"catalog addition preserves the existing 20 Hz state cadence");
+  });
+
   it("keeps shots, damage, kills, scores, and ammunition authoritative", async () => {
     const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
     const host = await colyseus.connectTo(room, { name: "HOST" });
