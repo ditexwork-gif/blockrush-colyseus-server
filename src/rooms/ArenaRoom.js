@@ -20,6 +20,30 @@ const TICK_MS = 1000 / TICK_RATE;
 const TICK = 1 / TICK_RATE;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+// ---- Security limits (override with environment variables on Colyseus Cloud) ----
+const limit = (name, fallback) => { const value = Number(process.env[name]); return Number.isFinite(value) && value > 0 ? value : fallback; };
+const MAX_ROOMS = limit("MAX_ROOMS", 150);                // hard ceiling of live rooms on this process
+const MAX_CLIENTS_PER_IP = limit("MAX_CLIENTS_PER_IP", 12); // concurrent connections from one public address (friends on one Wi-Fi still fit)
+const MAX_JOINS_PER_MINUTE = limit("MAX_JOINS_PER_MINUTE", 40);
+const ORPHAN_ROOM_MS = 30_000;       // a room nobody joined is closed after this
+const SIM_BUDGET_MAX = 10;           // ticks of movement a client may run ahead of real time
+const FIRE_CREDIT_SLACK_MS = 100;    // network bunching allowance on top of one weapon delay
+const STRIKE_LIMIT = 12;
+let liveRooms = 0;
+const ipClients = new Map();          // ip -> concurrent connections
+const ipJoins = new Map();            // ip -> { at, count }
+function clientIp(context) {
+  const forwarded = context?.headers?.get?.("x-forwarded-for");
+  return (context?.ip || (forwarded ? forwarded.split(",")[0].trim() : "") || "unknown").slice(0, 64);
+}
+// Loopback / private / unknown addresses are never limited: if the hosting proxy ever stops
+// forwarding the real visitor address, every player would look like one machine, and the
+// limits must fail open rather than lock the whole game.
+function limitedIp(ip) {
+  return !(ip === "unknown" || ip === "::1" || /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|::ffff:(127|10)\.|f[cd][0-9a-f]{2}:|fe80:)/i.test(ip));
+}
+export function resetSecurityCounters() { liveRooms = 0; ipClients.clear(); ipJoins.clear(); }
+
 function serverWeapon(id) {
   const weapon = byId[id];
   return { ...weapon, delay: weapon.delay * 1000, reload: weapon.reload * 1000 };
@@ -70,6 +94,7 @@ function spawn(arena, player, now) {
   player.ackInput = Number.isSafeInteger(player.ackInput) ? player.ackInput : 0;
   player.lastInputAt = now;
   player.inputCredit = 50;
+  player.simBudget = SIM_BUDGET_MAX;
   player.history = [{ at: now, tick: arena.tick || 0, pose: { ...player.pose } }];
 }
 
@@ -294,7 +319,9 @@ function shoot(arena, player, action, now) {
   const direction = aimDirection(yaw, pitch);
   const length = 1;
   const delay = weapon.burst && player.burstLeft > 0 ? weapon.burstDelay * 1000 : weapon.delay;
-  player.fireCredit = Math.min(Math.max(1000, delay), player.fireCredit + Math.max(0, now - player.fireAt));
+  // Bank at most one shot plus a little jitter slack. (Was 1000 ms, which let a
+  // client stand still for a second and then dump a dozen bullets in one frame.)
+  player.fireCredit = Math.min(delay + FIRE_CREDIT_SLACK_MS, player.fireCredit + Math.max(0, now - player.fireAt));
   player.fireAt = now;
   if (player.fireCredit + 1 < delay) return;
   player.fireCredit = Math.max(0, player.fireCredit - delay);
@@ -328,12 +355,15 @@ function shoot(arena, player, action, now) {
     });
     return;
   }
+  // Spread is rolled by the server. It used to be seeded from the client-chosen
+  // action.seq, so a modified client could pick sequence numbers with zero spread.
+  const spreadSeed = (Math.random() * 0x100000000) >>> 0;
   for (let pellet = 0; pellet < weapon.pellets; pellet++) {
     const spread = action.aiming ? (weapon.cls === "SNIPER" ? 0.0003 : weapon.spread * 0.2) : weapon.spread;
     const ray = {
-      x: normalized.x + (seededUnit(action.seq * 17 + pellet * 3) - 0.5) * spread,
-      y: normalized.y + (seededUnit(action.seq * 17 + pellet * 3 + 1) - 0.5) * spread,
-      z: normalized.z + (seededUnit(action.seq * 17 + pellet * 3 + 2) - 0.5) * spread
+      x: normalized.x + (seededUnit(spreadSeed + pellet * 3) - 0.5) * spread,
+      y: normalized.y + (seededUnit(spreadSeed + pellet * 3 + 1) - 0.5) * spread,
+      z: normalized.z + (seededUnit(spreadSeed + pellet * 3 + 2) - 0.5) * spread
     };
     const rayLength = Math.hypot(ray.x, ray.y, ray.z);
     for (const key of ["x", "y", "z"]) ray[key] /= rayLength;
@@ -447,12 +477,15 @@ export class ArenaRoom extends Room {
     i: (client, body) => this.queueInput(client, body),
     f: (client, body) => this.queueFire(client, body),
     a: (client, body) => this.handleAction(client, body),
-    pong: (client, nonce) => this.handlePong(client, nonce),
-    start: client => this.startMatch(client),
-    snapshot: client => ({ room: this.snapshotFor(client) }),
+    pong: (client, nonce) => { if (this.allowRequest(client)) this.handlePong(client, nonce); },
+    start: client => this.allowRequest(client) ? this.startMatch(client) : { error: "Slow down." },
+    snapshot: client => this.allowRequest(client) ? { room: this.snapshotFor(client) } : { error: "Slow down." },
   };
 
   async onCreate(options) {
+    if (liveRooms >= MAX_ROOMS) throw new Error("Servers are full. Try again in a minute.");
+    liveRooms++;
+    this.countedRoom = true;
     this.roomId = await this.generateRoomId();
     const now = Date.now();
     const map = ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
@@ -487,7 +520,40 @@ export class ArenaRoom extends Room {
     this.setState(state);
     this.setPatchRate(this.trafficRate);
     this.setSimulationInterval(() => this.step(), TICK_MS);
+    // Invite-only rooms must not be reachable through matchmaking (join / joinOrCreate);
+    // they stay joinable by their six-character code (joinById).
+    if (!publicRoom) await this.setPrivate(true);
+    // autoDispose is off, so a room that nobody ever enters would otherwise run forever.
+    this.emptyTimer = setTimeout(() => { if (!humans(this.arena).length) this.disconnect(); }, ORPHAN_ROOM_MS);
     roomCreated();
+  }
+
+  // Per-address connection and join-rate limits. Runs before onJoin.
+  onAuth(client, options, context) {
+    const ip = clientIp(context), now = Date.now();
+    if (!limitedIp(ip)) return { ip: "" };
+    const joins = ipJoins.get(ip);
+    if (!joins || now - joins.at >= 60_000) ipJoins.set(ip, { at: now, count: 1 });
+    else if (++joins.count > MAX_JOINS_PER_MINUTE) throw new Error("Too many join attempts. Wait a minute.");
+    if ((ipClients.get(ip) || 0) >= MAX_CLIENTS_PER_IP) throw new Error("Too many connections from this network.");
+    ipClients.set(ip, (ipClients.get(ip) || 0) + 1);
+    if (ipJoins.size > 20_000) for (const [key, value] of ipJoins) if (now - value.at >= 60_000) ipJoins.delete(key);
+    return { ip };
+  }
+
+  releaseIp(client) {
+    const ip = client?.auth?.ip;
+    if (!ip || client.ipReleased) return;
+    client.ipReleased = true;
+    const count = (ipClients.get(ip) || 1) - 1;
+    if (count > 0) ipClients.set(ip, count); else ipClients.delete(ip);
+  }
+
+  // Request/response messages (snapshot, start, pong) share the 40-per-second action allowance.
+  // Over the limit they get a tiny {error} reply instead of a thrown error, so a flood cannot fill the logs.
+  allowRequest(client) {
+    const player = this.playerFor(client);
+    return !player || this.countMessage(player, Date.now(), "action");
   }
 
   onJoin(client, options) {
@@ -536,6 +602,7 @@ export class ArenaRoom extends Room {
   }
 
   onLeave(client) {
+    this.releaseIp(client);
     this.arena.players = this.arena.players.filter(player => player.id !== client.sessionId);
     if (this.arena.hostId === client.sessionId) this.arena.hostId = humans(this.arena)[0]?.id || null;
     this.arena.revision++;
@@ -556,6 +623,8 @@ export class ArenaRoom extends Room {
   async onDispose() {
     clearTimeout(this.emptyTimer);
     clearTimeout(this.quickStartTimer);
+    if (this.countedRoom) { this.countedRoom = false; liveRooms = Math.max(0, liveRooms - 1); }
+    for (const client of this.clients) this.releaseIp(client);
     roomDisposed(this.arena?.players?.length || 0);
     await this.presence.srem(ROOM_IDS, this.roomId);
   }
@@ -586,6 +655,8 @@ export class ArenaRoom extends Room {
     tick(this.arena, now);
     for (const player of this.arena.players) this.resolveFires(player, now);
     if (this.arena.tick % 120 === 0) this.pingClients(now);
+    // Strikes fade (one every 10 s) so a laggy but honest player is never kicked for old noise.
+    if (this.arena.tick % 600 === 0) for (const player of this.arena.players) player.strikes = Math.max(0, player.strikes - 1);
     if (priorPhase !== this.arena.phase) {
       this.setTrafficMode(this.arena.phase);
       void this.setMetadata({ ...this.metadata, phase: this.arena.phase });
@@ -621,7 +692,7 @@ export class ArenaRoom extends Room {
     const limit = channel === "input" ? 70 : 40;
     if (now - player[windowKey] >= 1000) { player[windowKey] = now; player[countKey] = 0; }
     if (++player[countKey] <= limit) return true;
-    if (++player.strikes >= 5) this.clients.find(client => client.sessionId === player.id)?.leave(4002, "Input rate exceeded");
+    if (++player.strikes >= STRIKE_LIMIT) this.clients.find(client => client.sessionId === player.id)?.leave(4002, "Input rate exceeded");
     return false;
   }
 
@@ -683,7 +754,12 @@ export class ArenaRoom extends Room {
   stepPlayer(player, now) {
     if (!player.alive || this.arena.phase !== "playing") return;
     const q = player.pendingInputs, count = Math.min(q.length, q.length > 6 ? 3 : 1);
+    // Movement time budget: one tick of movement is earned per server tick, with a small
+    // reserve for lag catch-up. Without it a client could send dtTicks = 3 on every packet
+    // and move at three times normal speed.
+    player.simBudget = Math.min(SIM_BUDGET_MAX, (Number.isFinite(player.simBudget) ? player.simBudget : SIM_BUDGET_MAX) + 1);
     if (!count) {
+      player.simBudget = Math.max(0, player.simBudget - 1);
       const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map };
       player.pose = simulateMovement(player.pose, held, TICK);
     }
@@ -694,7 +770,9 @@ export class ArenaRoom extends Room {
       }
       const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map };
       const before = player.pose;
-      for (let step=0; step<input.dtTicks; step++) player.pose = simulateMovement(player.pose, { ...clean, jump:step===0&&clean.jump, slidePressed:step===0&&clean.slidePressed }, TICK);
+      const steps = Math.min(input.dtTicks, Math.floor(player.simBudget));
+      player.simBudget -= steps;
+      for (let step=0; step<steps; step++) player.pose = simulateMovement(player.pose, { ...clean, jump:step===0&&clean.jump, slidePressed:step===0&&clean.slidePressed }, TICK);
       if (![player.pose.x,player.pose.y,player.pose.z,player.pose.vx,player.pose.vy,player.pose.vz].every(Number.isFinite)) { player.pose=before; player.strikes++; }
       player.pose.yaw = clean.yaw; player.pose.pitch = clamp(clean.pitch,-1.45,1.45);
       player.lastInput = { ...clean, jump:false, slidePressed:false };

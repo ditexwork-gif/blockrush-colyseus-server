@@ -1,3 +1,4 @@
+import { matchMaker } from "colyseus";
 import assert from "node:assert/strict";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
 import appConfig from "../src/app.config.js";
@@ -15,6 +16,18 @@ function firePacket(seq: number, tick: number, yaw = 0, pitch = 0, weapon = 0) {
   view.setUint32(0, seq, true); view.setUint32(4, tick, true);
   view.setInt16(8, Math.round(yaw * 10000), true); view.setInt16(10, Math.round(pitch * 10000), true);
   view.setUint8(12, weapon); return bytes;
+}
+
+// The server banks at most one shot, so tests fire at the weapon's real cadence.
+async function fireSpaced(client: any, room: any, count: number, weaponId: string, slot = 0) {
+  for (let seq = 1; seq <= count; seq++) { client.send("f", firePacket(seq, room.arena.tick, 0, 0, slot)); await wait(byId[weaponId].delay * 1000 + 30); }
+}
+
+
+function timedInputPacket(seq: number, dtTicks = 1, yaw = 0) {
+  const bytes = new Uint8Array(12), view = new DataView(bytes.buffer);
+  view.setUint32(0, seq, true); view.setUint8(4, 1); view.setInt16(5, Math.round(yaw * 10000), true);
+  view.setUint16(9, dtTicks, true); view.setUint8(11, 0); return bytes;
 }
 
 describe("BLOCKRIFT realtime room", () => {
@@ -202,7 +215,7 @@ describe("BLOCKRIFT realtime room", () => {
     shooter.pose={...shooter.pose,x:0,y:0,z:12,yaw:0,pitch:0};target.pose={...target.pose,x:0,y:0,z:10,yaw:Math.PI,pitch:0};
     for(const player of [shooter,target])player.history=[{tick:room.arena.tick,at:Date.now(),pose:{...player.pose}}];
     shooter.fireCredit=1000;shooter.fireAt=Date.now();shooter.lastInput.aiming=true;
-    for(let seq=1;seq<=4;seq++)host.send("f",firePacket(seq,room.arena.tick));await wait();
+    await fireSpaced(host,room,4,"rift-01");await wait();
     assert.equal(shooter.kills,1);assert.equal(target.alive,false);assert.equal(shooter.ammo[0],26);
     assert(room.arena.events.some((e: any)=>e.type==="kill"&&e.weaponId==="rift-01"));
     assert(room.arena.events.filter((e: any)=>e.type==="shot").every((e: any)=>e.weaponId==="rift-01"));
@@ -246,7 +259,7 @@ describe("BLOCKRIFT realtime room", () => {
     shooter.fireCredit = 1000;
     shooter.fireAt = Date.now();
     shooter.pose.yaw = 0; shooter.pose.pitch = 0; shooter.lastInput.aiming = true;
-    for (let seq = 1; seq <= 4; seq++) host.send("f", firePacket(seq, room.arena.tick));
+    await fireSpaced(host, room, 4, "AR-30");
     await wait();
 
     const updated = await host.request("snapshot", {});
@@ -278,7 +291,7 @@ describe("BLOCKRIFT realtime room", () => {
     enemy.pose = { ...enemy.pose, x: 0, y: 0, z: 8, yaw: Math.PI, pitch: 0 };
     for (const player of [shooter, teammate, enemy]) player.history = [{ tick: room.arena.tick, at: Date.now(), pose: { ...player.pose } }];
     shooter.fireCredit = 1000; shooter.fireAt = Date.now(); shooter.lastInput.aiming = true;
-    for (let seq = 1; seq <= 4; seq++) host.send("f", firePacket(seq, room.arena.tick));
+    await fireSpaced(host, room, 4, "AR-30");
     await wait();
     assert.equal(teammate.hp, 100);
     assert.equal(teammate.deaths, 0);
@@ -286,5 +299,66 @@ describe("BLOCKRIFT realtime room", () => {
     assert.equal(enemy.deaths, 1);
     assert.equal(shooter.kills, 1);
     assert.ok(!room.arena.events.some((event: any) => event.type === "hit" && event.target === teammate.id));
+  });
+
+  // ---- Security limits ----
+
+  async function startedRoom() {
+    const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
+    const host = await colyseus.connectTo(room, { name: "HOST" });
+    await colyseus.connectTo(room, { name: "GUEST" });
+    await host.request("start", {});
+    return { room, host, player: room.arena.players.find((p: any) => p.id === host.sessionId) };
+  }
+  async function run(dtTicks: number) {
+    const { host, player } = await startedRoom();
+    player.pose = { ...player.pose, x: 0, y: 1.2, z: 28, vx: 0, vy: 0, vz: 0, grounded: true };
+    let seq = 0, distance = 0, last = { x: player.pose.x, z: player.pose.z };
+    const started = Date.now();
+    while (Date.now() - started < 1500) {
+      host.send("i", timedInputPacket(++seq, dtTicks, Math.PI / 2)); await wait(16);
+      distance += Math.hypot(player.pose.x - last.x, player.pose.z - last.z); last = { x: player.pose.x, z: player.pose.z };
+    }
+    return distance;
+  }
+
+  it("does not let inflated dtTicks move a player faster than real time", async () => {
+    const honest = await run(1), cheating = await run(3);
+    assert.ok(cheating < honest * 1.35, `dtTicks=3 travelled ${cheating.toFixed(1)} m against ${honest.toFixed(1)} m`);
+  });
+
+  it("does not let a player bank a second of fire rate and dump it in one frame", async () => {
+    const { room, host, player } = await startedRoom();
+    player.gunIds = ["SMG-40", "P-9"]; player.ammo = [byId["SMG-40"].cap, 10]; player.weapon = 0;
+    await wait(1200);
+    host.send("i", timedInputPacket(1, 1, player.pose.yaw)); await wait(40);
+    const before = player.ammo[0];
+    for (let seq = 1; seq <= 12; seq++) host.send("f", firePacket(seq, room.arena.tick, player.pose.yaw));
+    await wait(60);
+    assert.ok(before - player.ammo[0] <= 3, `${before - player.ammo[0]} shots left the barrel in 60 ms`);
+  });
+
+  it("keeps invite-only rooms out of matchmaking but joinable by code", async () => {
+    const options = { map: "foundry", mode: "ffa", public: false };
+    const host: any = await colyseus.sdk.create("blockrush", { ...options, name: "HOST" });
+    await assert.rejects(colyseus.sdk.join("blockrush", { ...options, name: "STRANGER" }));
+    const friend: any = await colyseus.sdk.joinById(host.roomId, { name: "FRIEND" });
+    assert.equal(friend.roomId, host.roomId);
+  });
+
+  it("rate-limits snapshot requests", async () => {
+    const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
+    const host = await colyseus.connectTo(room, { name: "HOST" });
+    let answered = 0;
+    await Promise.all(Array.from({ length: 500 }, () => host.request("snapshot", {}).then((reply: any) => { if (reply?.room) answered++; }).catch(() => {})));
+    assert.ok(answered <= 80, `${answered} of 500 snapshot requests were answered`);
+  });
+
+  it("closes rooms that nobody ever joins", async function () {
+    this.timeout(45000);
+    for (let index = 0; index < 5; index++) await matchMaker.createRoom("blockrush", { map: "foundry", mode: "ffa", public: false });
+    assert.equal((await matchMaker.query({ name: "blockrush" })).length, 5);
+    await wait(32000);
+    assert.equal((await matchMaker.query({ name: "blockrush" })).length, 0);
   });
 });
