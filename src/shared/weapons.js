@@ -429,8 +429,151 @@ WEAPONS.splice(0,WEAPONS.length,...originals.flatMap(original=>[original,...Obje
  ...original,range:[...original.range],id,name:id.toUpperCase(),level:1,price:0,
  ...(['rift-01','rift-02','rift-04'].includes(id)?{adsDistance:.12}:{})
 }))]));
+// Epic and Basic are cosmetic tiers: every gameplay field comes from its RIFT reference.
+export const EPIC_BASIC_CATALOG=Object.freeze([
+ {
+  "id": "epic-01",
+  "name": "Flare",
+  "tier": "Epic",
+  "reference": "rift-03"
+ },
+ {
+  "id": "epic-02",
+  "name": "Hex",
+  "tier": "Epic",
+  "reference": "rift-01"
+ },
+ {
+  "id": "epic-03",
+  "name": "Twinfang",
+  "tier": "Epic",
+  "reference": "rift-01"
+ },
+ {
+  "id": "epic-04",
+  "name": "Prism",
+  "tier": "Epic",
+  "reference": "rift-03"
+ },
+ {
+  "id": "epic-05",
+  "name": "Nova",
+  "tier": "Epic",
+  "reference": "rift-05"
+ },
+ {
+  "id": "epic-06",
+  "name": "Hammerhead",
+  "tier": "Epic",
+  "reference": "rift-07"
+ },
+ {
+  "id": "epic-07",
+  "name": "Blaze",
+  "tier": "Epic",
+  "reference": "rift-06"
+ },
+ {
+  "id": "epic-08",
+  "name": "Surge",
+  "tier": "Epic",
+  "reference": "rift-06"
+ },
+ {
+  "id": "epic-09",
+  "name": "Lancer",
+  "tier": "Epic",
+  "reference": "rift-09"
+ },
+ {
+  "id": "epic-10",
+  "name": "Venom",
+  "tier": "Epic",
+  "reference": "rift-09"
+ },
+ {
+  "id": "epic-11",
+  "name": "Cyclone",
+  "tier": "Epic",
+  "reference": "rift-12"
+ },
+ {
+  "id": "epic-12",
+  "name": "Overload",
+  "tier": "Epic",
+  "reference": "rift-12"
+ },
+ {
+  "id": "basic-02",
+  "name": "Trooper",
+  "tier": "Basic",
+  "reference": "rift-01"
+ },
+ {
+  "id": "basic-03",
+  "name": "Ranger",
+  "tier": "Basic",
+  "reference": "rift-03"
+ },
+ {
+  "id": "basic-04",
+  "name": "Hornet",
+  "tier": "Basic",
+  "reference": "rift-03"
+ },
+ {
+  "id": "basic-05",
+  "name": "Rook",
+  "tier": "Basic",
+  "reference": "rift-05"
+ },
+ {
+  "id": "basic-06",
+  "name": "Marshal",
+  "tier": "Basic",
+  "reference": "rift-07"
+ },
+ {
+  "id": "basic-07",
+  "name": "Bulldog",
+  "tier": "Basic",
+  "reference": "rift-06"
+ },
+ {
+  "id": "basic-08",
+  "name": "Bastion",
+  "tier": "Basic",
+  "reference": "rift-01"
+ },
+ {
+  "id": "basic-09",
+  "name": "Hawk",
+  "tier": "Basic",
+  "reference": "rift-09"
+ },
+ {
+  "id": "basic-10",
+  "name": "Sentinel",
+  "tier": "Basic",
+  "reference": "rift-09"
+ },
+ {
+  "id": "basic-11",
+  "name": "Rhino",
+  "tier": "Basic",
+  "reference": "rift-12"
+ },
+ {
+  "id": "basic-12",
+  "name": "Goliath",
+  "tier": "Basic",
+  "reference": "rift-12"
+ }
+].map(Object.freeze));
+export const EPIC_BASIC_REFERENCES=Object.freeze(Object.fromEntries(EPIC_BASIC_CATALOG.map(w=>[w.id,w.reference])));
+for(const entry of EPIC_BASIC_CATALOG){const base=WEAPONS.find(w=>w.id===entry.reference);WEAPONS.push({...base,range:[...base.range],id:entry.id,name:entry.name,tier:entry.tier})}
 export const byId=Object.fromEntries(WEAPONS.map(w=>[w.id,w]));
-export const STARTERS=["AR-30","SMG-40","SR-6","P-9",...Object.keys(MESHY_REFERENCES)];
+export const STARTERS=["AR-30","SMG-40","SR-6","P-9",...Object.keys(MESHY_REFERENCES),...EPIC_BASIC_CATALOG.map(w=>w.id)];
 export function damageAtRange(w,d){const [full,end]=w.range;return end<=full?1:Math.max(0,Math.min(1,1-(d-full)/(end-full)))*.6+.4}
 function selectedLoadout(p){return p.classes?.[p.selectedClass]||p.loadout||{}}
 export function cardState(p,w){return p.level<w.level?"locked":p.unlocks.includes(w.id)?(selectedLoadout(p)[w.slot]===w.id?"equipped":"owned"):p.coins>=w.price?"affordable":"expensive"}

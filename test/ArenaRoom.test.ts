@@ -2,7 +2,7 @@ import { matchMaker } from "colyseus";
 import assert from "node:assert/strict";
 import { boot, type ColyseusTestServer } from "@colyseus/testing";
 import appConfig from "../src/app.config.js";
-import {byId,MESHY_REFERENCES} from "../src/shared/weapons.js";
+import {byId,MESHY_REFERENCES,EPIC_BASIC_REFERENCES} from "../src/shared/weapons.js";
 
 const wait = (ms = 120) => new Promise(resolve => setTimeout(resolve, ms));
 function inputPacket(seq: number, { forward = true, yaw = 0, pitch = 0, weapon = 0 } = {}) {
@@ -245,6 +245,29 @@ describe("BLOCKRIFT realtime room", () => {
     }
   });
 
+  it("accepts all 23 Epic and Basic loadouts and attributes authoritative shots and kills", async () => {
+    for(const id of Object.keys(EPIC_BASIC_REFERENCES)){
+      const w=byId[id],slot=w.slot==="secondary"?1:0,ids=slot?["AR-30",id]:[id,"P-9"];
+      const room: any=await colyseus.createRoom("blockrush",{map:"foundry",mode:"ffa"});
+      const host=await colyseus.connectTo(room,{name:id}),guest=await colyseus.connectTo(room,{name:"TARGET"});await host.request("start",{});
+      host.send("a",{kind:"loadout",seq:1,ids,classIndex:0});await wait(40);
+      const shooter=room.arena.players.find((p: any)=>p.id===host.sessionId),target=room.arena.players.find((p: any)=>p.id===guest.sessionId);
+      assert.deepEqual(shooter.gunIds,ids,id+" accepted in its proper slot");assert.equal(shooter.ammo[slot],w.cap);
+      shooter.weapon=slot;shooter.lastInput.weapon=slot;shooter.lastInput.aiming=true;
+      shooter.pose={...shooter.pose,x:0,y:0,z:12,yaw:0,pitch:0};target.pose={...target.pose,x:0,y:0,z:10,yaw:Math.PI,pitch:0};
+      // One accepted finishing shot per class, without bypassing its cooldown.
+      // The existing combat tests cover full-health damage and fire-rate rules.
+      target.hp=1;
+      for(const p of [shooter,target])p.history=[{tick:room.arena.tick,at:Date.now(),pose:{...p.pose}}];
+      shooter.fireCredit=1000;shooter.fireAt=Date.now();
+      const rounds=1;
+      for(let seq=1;seq<=rounds;seq++)host.send("f",firePacket(seq,room.arena.tick,0,0,slot));await wait();
+      assert.equal(shooter.ammo[slot],w.cap-rounds,id+" consumes inherited magazine rounds");assert.equal(shooter.kills,1,id+" kills authoritatively");
+      assert(room.arena.events.some((e: any)=>e.type==="kill"&&e.weaponId===id));assert(room.arena.events.filter((e: any)=>e.type==="shot").every((e: any)=>e.weaponId===id));
+      assert.equal(room.patchRate,50,"no additional gameplay message cadence");
+    }
+  });
+
   it("keeps shots, damage, kills, scores, and ammunition authoritative", async () => {
     const room: any = await colyseus.createRoom("blockrush", { map: "foundry", mode: "ffa" });
     const host = await colyseus.connectTo(room, { name: "HOST" });
@@ -362,3 +385,4 @@ describe("BLOCKRIFT realtime room", () => {
     assert.equal((await matchMaker.query({ name: "blockrush" })).length, 0);
   });
 });
+
