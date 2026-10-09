@@ -12,7 +12,7 @@
     "start": "tsx watch src/index.ts",
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "clean": "rimraf build",
-    "test": "mocha -r tsx test/**.test.ts --exit --timeout 15000",
+    "test": "node scripts/test.mjs",
     "load-test": "node scripts/load-test.mjs"
   },
   "license": "UNLICENSED",
@@ -29,6 +29,7 @@
   "dependencies": {
     "@colyseus/tools": "0.18.1",
     "colyseus": "0.18.5",
-    "express": "5.2.1"
+    "express": "5.2.1",
+    "@colyseus/ws-transport": "0.18.4"
   }
 }

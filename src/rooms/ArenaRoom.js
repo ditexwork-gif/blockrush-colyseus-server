@@ -1,4 +1,5 @@
 import { Room } from "colyseus";
+import {admit} from "../environment-admission.js";
 import { ARENA_SOLIDS, DEPOT_SOLIDS, simulateMovement } from "../shared/movement.js";
 import { byId, damageAtRange } from "../shared/weapons.js";
 import { inputMessage, playerJoined, playerLeft, recordTick, roomCreated, roomDisposed } from "../metrics.js";
@@ -470,6 +471,7 @@ function applyActions(arena, player, body, now) {
 }
 
 export class ArenaRoom extends Room {
+  static environment="live";
   maxClients = 8;
   arena = null;
 
@@ -483,6 +485,8 @@ export class ArenaRoom extends Room {
   };
 
   async onCreate(options) {
+    this.environment=this.constructor.environment;
+    this.roomIdsKey=this.environment==="dev"?"dev_"+ROOM_IDS:ROOM_IDS;
     if (liveRooms >= MAX_ROOMS) throw new Error("Servers are full. Try again in a minute.");
     liveRooms++;
     this.countedRoom = true;
@@ -530,6 +534,7 @@ export class ArenaRoom extends Room {
 
   // Per-address connection and join-rate limits. Runs before onJoin.
   onAuth(client, options, context) {
+    admit(this.environment,context?.headers?.get?.("origin"),context?.token);
     const ip = clientIp(context), now = Date.now();
     if (!limitedIp(ip)) return { ip: "" };
     const joins = ipJoins.get(ip);
@@ -626,14 +631,14 @@ export class ArenaRoom extends Room {
     if (this.countedRoom) { this.countedRoom = false; liveRooms = Math.max(0, liveRooms - 1); }
     for (const client of this.clients) this.releaseIp(client);
     roomDisposed(this.arena?.players?.length || 0);
-    await this.presence.srem(ROOM_IDS, this.roomId);
+    await this.presence.srem(this.roomIdsKey, this.roomId);
   }
 
   async generateRoomId() {
-    const current = await this.presence.smembers(ROOM_IDS);
+    const current = await this.presence.smembers(this.roomIdsKey);
     let id;
-    do id = makeRoomCode(); while (current.includes(id));
-    await this.presence.sadd(ROOM_IDS, id);
+    do id = (this.environment==="dev"?"dev_":"")+makeRoomCode(); while (current.includes(id));
+    await this.presence.sadd(this.roomIdsKey, id);
     return id;
   }
 
@@ -852,5 +857,17 @@ export class ArenaRoom extends Room {
     const now = Date.now();
     this.beginMatch(now,this.metadata.public);
     return { room: this.snapshotFor(client) };
+  }
+}
+
+// DEV inherits every gameplay and security-limit method unchanged.
+export class DevArenaRoom extends ArenaRoom {
+  static environment="dev";
+  static async onAuth(token,options,context){
+    admit("dev",context?.headers?.get?.("origin"),token);
+    // MatchMaker converts literal true to undefined authData. This deliberately
+    // preserves ArenaRoom's instance onAuth and its IP limits, while preventing
+    // @colyseus/auth from interpreting our two-part HMAC token as a JWT.
+    return true;
   }
 }
