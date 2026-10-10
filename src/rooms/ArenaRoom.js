@@ -1,3 +1,4 @@
+import {sanitizeRoomName,defaultRoomName} from '../room-listing.js';
 import {mapRayDistance} from '../shared/map-ray.js';
 import {createHash} from 'node:crypto';
 import {prepareNetworkMap} from '../shared/network-map.js';
@@ -502,7 +503,9 @@ export class ArenaRoom extends Room {
     const map = prepared ? "custom" : ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
     const mode = ["ffa", "tdm", "gun"].includes(options?.mode) ? options.mode : "ffa";
     const publicRoom = options?.public === true;
-    this.metadata = { map, mapHash, mapName: prepared?.map.name || map, mode, public: publicRoom, phase: "waiting", region: "FRA" };
+    this.connectedDisplayIds=new Set();
+    this.customRoomName=sanitizeRoomName(options?.roomName);
+    this.metadata = { name:this.customRoomName||defaultRoomName(options?.name),roundTimeSeconds:MATCH_MS/1000, map, mapHash, mapName: prepared?.map.name || map, mode, public: publicRoom, phase: "waiting", region: "FRA" };
     this.arena = {
       code: this.roomId,
       map,
@@ -519,6 +522,7 @@ export class ArenaRoom extends Room {
       eventSeq: 0,
       projectiles: []
     };
+    if(prepared)this.metadata.mapPreview={width:prepared.map.width,depth:prepared.map.depth,shapes:prepared.solids.map(({x,z,w,d,top,yaw=0})=>({x,z,w,d,top,yaw}))};
     this.arena.tick = 0;
     this.arena.botSerial = 0;
     this.arena.quickStartsAt = 0;
@@ -569,6 +573,11 @@ export class ArenaRoom extends Room {
     return !player || this.countMessage(player, Date.now(), "action");
   }
 
+  syncListing(){
+    if(!this.metadata.public)return;
+    void this.setMetadata({...this.metadata,phase:this.arena.phase,endsAt:this.arena.endsAt,botCount:this.arena.players.filter(p=>p.bot).length,connectedPlayers:this.arena.players.filter(p=>!p.bot&&this.connectedDisplayIds.has(p.id)).map(p=>p.name)});
+  }
+
   onJoin(client, options) {
     clearTimeout(this.emptyTimer);
     const now = Date.now();
@@ -579,7 +588,8 @@ export class ArenaRoom extends Room {
     const player = makePlayer(this.arena, client.sessionId, options?.name, now);
     player.classIndex=clamp(Math.floor(Number(options?.classIndex)||0),0,4);
     this.arena.players.push(player);
-    if (!this.arena.hostId) this.arena.hostId = player.id;
+    if (!this.arena.hostId){this.arena.hostId = player.id;if(!this.customRoomName)this.metadata.name=defaultRoomName(player.name);}
+    this.connectedDisplayIds.add(client.sessionId);
     this.arena.revision++;
     this.state.players.set(player.id, new PlayerNetState());
     playerJoined();
@@ -590,10 +600,11 @@ export class ArenaRoom extends Room {
         this.quickStartTimer=setTimeout(()=>{this.quickStartTimer=null;if(this.arena.phase==="waiting"&&humans(this.arena).length)this.beginMatch(Date.now(),true)},PUBLIC_START_MS);
       }
     }
-    this.syncState(now);
+    this.syncState(now);this.syncListing();
   }
 
   onDrop(client) {
+    this.connectedDisplayIds.delete(client.sessionId);this.syncListing();
     const player = this.playerFor(client);
     if (player) {
       player.pendingInputs.length = 0;
@@ -606,6 +617,7 @@ export class ArenaRoom extends Room {
   }
 
   onReconnect(client) {
+    this.connectedDisplayIds.add(client.sessionId);this.syncListing();
     const player = this.playerFor(client);
     if (player) {
       player.lastInputAt = Date.now();
@@ -615,6 +627,7 @@ export class ArenaRoom extends Room {
   }
 
   onLeave(client) {
+    this.connectedDisplayIds.delete(client.sessionId);
     this.releaseIp(client);
     this.arena.players = this.arena.players.filter(player => player.id !== client.sessionId);
     if (this.arena.hostId === client.sessionId) this.arena.hostId = humans(this.arena)[0]?.id || null;
@@ -623,12 +636,12 @@ export class ArenaRoom extends Room {
     playerLeft();
     const now=Date.now();
     if(this.metadata.public&&this.arena.phase==="playing"&&humans(this.arena).length)fillBots(this.arena,this.state,now);
-    this.syncState(now);
+    this.syncState(now);this.syncListing();
     if (!humans(this.arena).length) {
       clearTimeout(this.quickStartTimer);this.quickStartTimer=null;
       this.arena.quickStartsAt=0;
       for(const bot of this.arena.players.filter(value=>value.bot))this.state.players.delete(bot.id);
-      this.arena.players=[];this.arena.hostId=null;
+      this.arena.players=[];this.arena.hostId=null;this.syncListing();
       this.emptyTimer = setTimeout(() => this.disconnect(), 30_000);
     }
   }
@@ -672,7 +685,7 @@ export class ArenaRoom extends Room {
     if (this.arena.tick % 600 === 0) for (const player of this.arena.players) player.strikes = Math.max(0, player.strikes - 1);
     if (priorPhase !== this.arena.phase) {
       this.setTrafficMode(this.arena.phase);
-      void this.setMetadata({ ...this.metadata, phase: this.arena.phase });
+      if(this.metadata.public)this.syncListing();else void this.setMetadata({...this.metadata,phase:this.arena.phase});
       for (const player of this.arena.players) { player.pendingInputs.length=0; player.pendingFires.length=0; }
     }
     if (this.arena.phase === "playing" || priorPhase !== this.arena.phase || this.arena.tick % 60 === 0) {
@@ -837,10 +850,10 @@ export class ArenaRoom extends Room {
     this.arena.quickStartsAt=0;
     this.setTrafficMode("playing");
     this.arena.phase = "playing";
-    void this.setMetadata({ ...this.metadata, phase: "playing" });
+
     this.arena.round++;
     if(shouldFillBots)fillBots(this.arena,this.state,now);
-    this.arena.endsAt = now + MATCH_MS;
+    this.arena.endsAt = now + MATCH_MS;if(this.metadata.public)this.syncListing();else void this.setMetadata({...this.metadata,phase:"playing"});
     this.arena.events = [];
     this.arena.projectiles = [];
     this.arena.players.forEach((value, index) => {

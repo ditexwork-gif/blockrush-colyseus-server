@@ -1,5 +1,7 @@
 # Editor arenas in multiplayer — preparation only
 
+This branch now also prepares public room details. Use `combined-editor-maps-room-details-deployment.md` for the ONE combined deployment, exact baseline, checks and rollback; do not deploy these as two separate changes.
+
 Baseline: `66f9c9acaebaddfc85552f69fe1d33654cc2ba81` on main. Do not merge or deploy until Ditex separately approves the shared-server deployment.
 
 ## What changes
