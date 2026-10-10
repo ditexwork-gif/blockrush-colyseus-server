@@ -17,7 +17,7 @@ const server = defineServer({
       service: "blockrush-server"
     })),
     metrics: createEndpoint("/metrics", { method: "GET" }, async () => metricsSnapshot()),
-    devRooms: createEndpoint("/dev/rooms", {method:"GET"}, async () => ({region:"FRA",rooms:(await matchMaker.query({name:ENV_CONFIG.environments.dev.roomName,private:false,unlisted:false})).filter(room=>room.metadata?.public===true).map(room=>({roomId:room.roomId,clients:room.clients,maxClients:room.maxClients,locked:room.locked,map:room.metadata?.map,mapName:room.metadata?.mapName,mapHash:room.metadata?.mapHash,mode:room.metadata?.mode,phase:room.metadata?.phase}))})),
+    devRooms: createEndpoint("/dev/rooms", {method:"GET"}, async () => ({region:"FRA",capabilities:{editorMaps:true},rooms:(await matchMaker.query({name:ENV_CONFIG.environments.dev.roomName,private:false,unlisted:false})).filter(room=>room.metadata?.public===true).map(room=>({roomId:room.roomId,clients:room.clients,maxClients:room.maxClients,locked:room.locked,map:room.metadata?.map,mapName:room.metadata?.mapName,mapHash:room.metadata?.mapHash,mode:room.metadata?.mode,phase:room.metadata?.phase}))})),
     rooms: createEndpoint("/rooms", { method: "GET" }, async () => {
       const listings = await matchMaker.query({ name: "blockrush", private: false, unlisted: false });
       return {
