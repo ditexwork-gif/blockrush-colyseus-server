@@ -19,7 +19,8 @@ export const NetEvent = schema({
 }, "NetEvent");
 
 export const ArenaState = schema({
-  code: t.string(""), map: t.string("foundry"), mode: t.string("ffa"), hostId: t.string(""),
+  mapHash:t.string(""), code: t.string(""), map: t.string("foundry"), mode: t.string("ffa"), hostId: t.string(""),
   phase: t.uint8(0), tick: t.uint32(0), round: t.uint16(0), startsIn: t.uint8(0), endsAtTick: t.uint32(0), serverTime: t.float64(0),
   players: t.map(PlayerNetState), events: t.array(NetEvent)
 }, "ArenaState");
+
