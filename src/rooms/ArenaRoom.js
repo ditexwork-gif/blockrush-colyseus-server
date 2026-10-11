@@ -1,3 +1,7 @@
+import {sanitizeRoomName,defaultRoomName} from '../room-listing.js';
+import {mapRayDistance} from '../shared/map-ray.js';
+import {createHash} from 'node:crypto';
+import {prepareNetworkMap} from '../shared/network-map.js';
 import { Room } from "colyseus";
 import {admit} from "../environment-admission.js";
 import { ARENA_SOLIDS, DEPOT_SOLIDS, simulateMovement } from "../shared/movement.js";
@@ -67,15 +71,15 @@ function makeRoomCode() {
 
 function spawn(arena, player, now) {
   const others = arena.players.filter(candidate => candidate.id !== player.id && candidate.alive);
-  const available = SPAWNS[arena.map] || SPAWNS.foundry;
+  const available = arena.mapData ? arena.mapData.objects.filter(o=>o.type==="spawn").map(o=>[o.x,o.z,o.y+arena.geometry.offset,o.yaw]) : SPAWNS[arena.map] || SPAWNS.foundry;
   const spots = available
     .map(point => ({ point, distance: Math.min(999, ...others.map(other => Math.hypot(other.pose.x - point[0], other.pose.z - point[1]))) }))
     .sort((a, b) => b.distance - a.distance);
   const point = spots[0].point;
   player.pose = {
-    x: point[0], y: 0, z: point[1], vx: 0, vy: 0, vz: 0,
+    x: point[0], y: point[2] || 0, z: point[1], vx: 0, vy: 0, vz: 0,
     grounded: true, slide: 0, slideCooldown: 0, slideQueued: false,
-    landedAt: -99, time: 0, yaw: Math.atan2(point[0], point[1]), pitch: 0
+    landedAt: -99, time: 0, yaw: point[3] == null ? Math.atan2(point[0], point[1]) : point[3]*Math.PI/180, pitch: 0
   };
   player.hp = 100;
   player.alive = true;
@@ -296,12 +300,11 @@ function damagePlayer(arena, player, target, damage, head, now, action = {}, end
 
 function worldDistance(arena, origin, direction, maxDistance = 220) {
   let distance = maxDistance;
-  for (const solid of WALLS[arena.map] || WALLS.foundry) {
-    distance = Math.min(distance, rayBox(
-      origin,
-      direction,
-      { x: solid.x - solid.w / 2, y: solid.bottom, z: solid.z - solid.d / 2 },
-      { x: solid.x + solid.w / 2, y: solid.top, z: solid.z + solid.d / 2 }
+  for (const solid of arena.geometry?.solids || WALLS[arena.map] || WALLS.foundry) {
+    distance = Math.min(distance, arena.geometry ? mapRayDistance(solid,origin,direction,maxDistance) : rayBox(
+      origin,direction,
+      {x:solid.x-solid.w/2,y:solid.bottom,z:solid.z-solid.d/2},
+      {x:solid.x+solid.w/2,y:solid.top,z:solid.z+solid.d/2}
     ));
   }
   return distance;
@@ -485,6 +488,11 @@ export class ArenaRoom extends Room {
   };
 
   async onCreate(options) {
+    if(options?.map==="custom"&&this.constructor.environment!=="dev")throw Error("Editor-map multiplayer is currently DEV-only.");
+    const prepared=options?.map==="custom"?prepareNetworkMap(options.mapData):null;
+    const mapHash=prepared?createHash("sha256").update(prepared.json).digest("hex"):"";
+    if(prepared&&options.mapHash!==mapHash)throw Error("Arena checksum mismatch.");
+    if(prepared&&!prepared.map.modes.includes(options.mode||"ffa"))throw Error("This arena does not support the selected mode.");
     this.environment=this.constructor.environment;
     this.roomIdsKey=this.environment==="dev"?"dev_"+ROOM_IDS:ROOM_IDS;
     if (liveRooms >= MAX_ROOMS) throw new Error("Servers are full. Try again in a minute.");
@@ -492,13 +500,16 @@ export class ArenaRoom extends Room {
     this.countedRoom = true;
     this.roomId = await this.generateRoomId();
     const now = Date.now();
-    const map = ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
+    const map = prepared ? "custom" : ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
     const mode = ["ffa", "tdm", "gun"].includes(options?.mode) ? options.mode : "ffa";
     const publicRoom = options?.public === true;
-    this.metadata = { map, mode, public: publicRoom, phase: "waiting", region: "FRA" };
+    this.connectedDisplayIds=new Set();
+    this.customRoomName=sanitizeRoomName(options?.roomName);
+    this.metadata = { name:this.customRoomName||defaultRoomName(options?.name),roundTimeSeconds:MATCH_MS/1000, map, mapHash, mapName: prepared?.map.name || map, mode, public: publicRoom, phase: "waiting", region: "FRA" };
     this.arena = {
       code: this.roomId,
       map,
+      mapHash, mapData: prepared?.map || null, geometry: prepared || null,
       mode,
       revision: 0,
       round: 0,
@@ -511,6 +522,7 @@ export class ArenaRoom extends Room {
       eventSeq: 0,
       projectiles: []
     };
+    if(prepared)this.metadata.mapPreview={width:prepared.map.width,depth:prepared.map.depth,shapes:prepared.solids.map(({x,z,w,d,top,yaw=0})=>({x,z,w,d,top,yaw}))};
     this.arena.tick = 0;
     this.arena.botSerial = 0;
     this.arena.quickStartsAt = 0;
@@ -520,7 +532,7 @@ export class ArenaRoom extends Room {
     this.trafficRate = 1000;
     this.autoDispose = false;
     const state = new ArenaState();
-    state.code = this.roomId; state.map = map; state.mode = mode; state.serverTime = now;
+    state.mapHash=mapHash; state.code = this.roomId; state.map = map; state.mode = mode; state.serverTime = now;
     this.setState(state);
     this.setPatchRate(this.trafficRate);
     this.setSimulationInterval(() => this.step(), TICK_MS);
@@ -561,6 +573,11 @@ export class ArenaRoom extends Room {
     return !player || this.countMessage(player, Date.now(), "action");
   }
 
+  syncListing(){
+    if(!this.metadata.public)return;
+    void this.setMetadata({...this.metadata,phase:this.arena.phase,endsAt:this.arena.endsAt,botCount:this.arena.players.filter(p=>p.bot).length,connectedPlayers:this.arena.players.filter(p=>!p.bot&&this.connectedDisplayIds.has(p.id)).map(p=>p.name)});
+  }
+
   onJoin(client, options) {
     clearTimeout(this.emptyTimer);
     const now = Date.now();
@@ -571,7 +588,8 @@ export class ArenaRoom extends Room {
     const player = makePlayer(this.arena, client.sessionId, options?.name, now);
     player.classIndex=clamp(Math.floor(Number(options?.classIndex)||0),0,4);
     this.arena.players.push(player);
-    if (!this.arena.hostId) this.arena.hostId = player.id;
+    if (!this.arena.hostId){this.arena.hostId = player.id;if(!this.customRoomName)this.metadata.name=defaultRoomName(player.name);}
+    this.connectedDisplayIds.add(client.sessionId);
     this.arena.revision++;
     this.state.players.set(player.id, new PlayerNetState());
     playerJoined();
@@ -582,10 +600,11 @@ export class ArenaRoom extends Room {
         this.quickStartTimer=setTimeout(()=>{this.quickStartTimer=null;if(this.arena.phase==="waiting"&&humans(this.arena).length)this.beginMatch(Date.now(),true)},PUBLIC_START_MS);
       }
     }
-    this.syncState(now);
+    this.syncState(now);this.syncListing();
   }
 
   onDrop(client) {
+    this.connectedDisplayIds.delete(client.sessionId);this.syncListing();
     const player = this.playerFor(client);
     if (player) {
       player.pendingInputs.length = 0;
@@ -598,6 +617,7 @@ export class ArenaRoom extends Room {
   }
 
   onReconnect(client) {
+    this.connectedDisplayIds.add(client.sessionId);this.syncListing();
     const player = this.playerFor(client);
     if (player) {
       player.lastInputAt = Date.now();
@@ -607,6 +627,7 @@ export class ArenaRoom extends Room {
   }
 
   onLeave(client) {
+    this.connectedDisplayIds.delete(client.sessionId);
     this.releaseIp(client);
     this.arena.players = this.arena.players.filter(player => player.id !== client.sessionId);
     if (this.arena.hostId === client.sessionId) this.arena.hostId = humans(this.arena)[0]?.id || null;
@@ -615,12 +636,12 @@ export class ArenaRoom extends Room {
     playerLeft();
     const now=Date.now();
     if(this.metadata.public&&this.arena.phase==="playing"&&humans(this.arena).length)fillBots(this.arena,this.state,now);
-    this.syncState(now);
+    this.syncState(now);this.syncListing();
     if (!humans(this.arena).length) {
       clearTimeout(this.quickStartTimer);this.quickStartTimer=null;
       this.arena.quickStartsAt=0;
       for(const bot of this.arena.players.filter(value=>value.bot))this.state.players.delete(bot.id);
-      this.arena.players=[];this.arena.hostId=null;
+      this.arena.players=[];this.arena.hostId=null;this.syncListing();
       this.emptyTimer = setTimeout(() => this.disconnect(), 30_000);
     }
   }
@@ -648,7 +669,7 @@ export class ArenaRoom extends Room {
 
   snapshotFor(client) {
     const now = Date.now();
-    return publicRoom(this.arena, now, this.playerFor(client));
+    return {...publicRoom(this.arena, now, this.playerFor(client)),mapHash:this.arena.mapHash,mapData:this.arena.mapData};
   }
 
   step() {
@@ -664,7 +685,7 @@ export class ArenaRoom extends Room {
     if (this.arena.tick % 600 === 0) for (const player of this.arena.players) player.strikes = Math.max(0, player.strikes - 1);
     if (priorPhase !== this.arena.phase) {
       this.setTrafficMode(this.arena.phase);
-      void this.setMetadata({ ...this.metadata, phase: this.arena.phase });
+      if(this.metadata.public)this.syncListing();else void this.setMetadata({...this.metadata,phase:this.arena.phase});
       for (const player of this.arena.players) { player.pendingInputs.length=0; player.pendingFires.length=0; }
     }
     if (this.arena.phase === "playing" || priorPhase !== this.arena.phase || this.arena.tick % 60 === 0) {
@@ -765,7 +786,7 @@ export class ArenaRoom extends Room {
     player.simBudget = Math.min(SIM_BUDGET_MAX, (Number.isFinite(player.simBudget) ? player.simBudget : SIM_BUDGET_MAX) + 1);
     if (!count) {
       player.simBudget = Math.max(0, player.simBudget - 1);
-      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map };
+      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
       player.pose = simulateMovement(player.pose, held, TICK);
     }
     for (let index=0; index<count; index++) {
@@ -773,7 +794,7 @@ export class ArenaRoom extends Room {
       if (Number.isInteger(input.weapon) && gunsFor(player)[input.weapon] && input.weapon !== player.weapon && this.arena.mode !== "gun") {
         player.weapon = input.weapon; player.reloadEnd = 0; player.swapUntil = now + 350;
       }
-      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map };
+      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
       const before = player.pose;
       const steps = Math.min(input.dtTicks, Math.floor(player.simBudget));
       player.simBudget -= steps;
@@ -800,7 +821,7 @@ export class ArenaRoom extends Room {
 
   syncState(now) {
     const state=this.state, arena=this.arena;
-    state.code=arena.code; state.map=arena.map; state.mode=arena.mode; state.hostId=arena.hostId||"";
+    state.mapHash=arena.mapHash; state.code=arena.code; state.map=arena.map; state.mode=arena.mode; state.hostId=arena.hostId||"";
     state.phase=arena.phase==="waiting"?0:arena.phase==="playing"?1:2; state.tick=arena.tick; state.round=arena.round;
     state.startsIn=arena.phase==="waiting"&&arena.quickStartsAt?clamp(Math.ceil((arena.quickStartsAt-now)/1000),0,255):0;
     state.endsAtTick=arena.phase==="playing"?arena.tick+Math.max(0,Math.ceil((arena.endsAt-now)/TICK_MS)):arena.tick;
@@ -829,10 +850,10 @@ export class ArenaRoom extends Room {
     this.arena.quickStartsAt=0;
     this.setTrafficMode("playing");
     this.arena.phase = "playing";
-    void this.setMetadata({ ...this.metadata, phase: "playing" });
+
     this.arena.round++;
     if(shouldFillBots)fillBots(this.arena,this.state,now);
-    this.arena.endsAt = now + MATCH_MS;
+    this.arena.endsAt = now + MATCH_MS;if(this.metadata.public)this.syncListing();else void this.setMetadata({...this.metadata,phase:"playing"});
     this.arena.events = [];
     this.arena.projectiles = [];
     this.arena.players.forEach((value, index) => {
@@ -871,3 +892,4 @@ export class DevArenaRoom extends ArenaRoom {
     return true;
   }
 }
+
