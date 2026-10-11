@@ -11,6 +11,6 @@ export function publicRoomListing(room,now=Date.now()){
  if(m.phase==='playing'&&Number.isFinite(m.endsAt))result.timeRemainingSeconds=Math.max(0,Math.ceil((m.endsAt-now)/1000));
  else if(m.phase==='finished')result.timeRemainingSeconds=0;
  if(Number.isInteger(m.botCount)&&m.botCount>=0)result.botCount=m.botCount;
- if(m.map==='custom'&&m.mapPreview)result.mapPreview=m.mapPreview;
+ if(m.mapPreview)result.mapPreview=m.mapPreview;
  return result;
 }

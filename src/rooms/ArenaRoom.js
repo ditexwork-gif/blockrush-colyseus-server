@@ -1,3 +1,4 @@
+import {officialArena,isOfficialArena} from '../shared/official-arenas.js';
 import {sanitizeRoomName,defaultRoomName} from '../room-listing.js';
 import {mapRayDistance} from '../shared/map-ray.js';
 import {createHash} from 'node:crypto';
@@ -489,9 +490,11 @@ export class ArenaRoom extends Room {
 
   async onCreate(options) {
     if(options?.map==="custom"&&this.constructor.environment!=="dev")throw Error("Editor-map multiplayer is currently DEV-only.");
-    const prepared=options?.map==="custom"?prepareNetworkMap(options.mapData):null;
+    const official=officialArena(options?.map);
+    if(official&&(options.mapData!==undefined||options.mapHash!==undefined))throw Error("Official arena geometry is server-owned.");
+    const prepared=official?prepareNetworkMap(official):options?.map==="custom"?prepareNetworkMap(options.mapData):null;
     const mapHash=prepared?createHash("sha256").update(prepared.json).digest("hex"):"";
-    if(prepared&&options.mapHash!==mapHash)throw Error("Arena checksum mismatch.");
+    if(prepared&&!official&&options.mapHash!==mapHash)throw Error("Arena checksum mismatch.");
     if(prepared&&!prepared.map.modes.includes(options.mode||"ffa"))throw Error("This arena does not support the selected mode.");
     this.environment=this.constructor.environment;
     this.roomIdsKey=this.environment==="dev"?"dev_"+ROOM_IDS:ROOM_IDS;
@@ -500,7 +503,7 @@ export class ArenaRoom extends Room {
     this.countedRoom = true;
     this.roomId = await this.generateRoomId();
     const now = Date.now();
-    const map = prepared ? "custom" : ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
+    const map = official ? options.map : prepared ? "custom" : ["foundry", "depot"].includes(options?.map) ? options.map : "foundry";
     const mode = ["ffa", "tdm", "gun"].includes(options?.mode) ? options.mode : "ffa";
     const publicRoom = options?.public === true;
     this.connectedDisplayIds=new Set();
@@ -786,7 +789,7 @@ export class ArenaRoom extends Room {
     player.simBudget = Math.min(SIM_BUDGET_MAX, (Number.isFinite(player.simBudget) ? player.simBudget : SIM_BUDGET_MAX) + 1);
     if (!count) {
       player.simBudget = Math.max(0, player.simBudget - 1);
-      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
+      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{geometryVersion:3,solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
       player.pose = simulateMovement(player.pose, held, TICK);
     }
     for (let index=0; index<count; index++) {
@@ -794,7 +797,7 @@ export class ArenaRoom extends Room {
       if (Number.isInteger(input.weapon) && gunsFor(player)[input.weapon] && input.weapon !== player.weapon && this.arena.mode !== "gun") {
         player.weapon = input.weapon; player.reloadEnd = 0; player.swapUntil = now + 350;
       }
-      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
+      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{geometryVersion:3,solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
       const before = player.pose;
       const steps = Math.min(input.dtTicks, Math.floor(player.simBudget));
       player.simBudget -= steps;

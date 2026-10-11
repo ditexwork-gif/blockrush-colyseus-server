@@ -1,3 +1,4 @@
+import {OFFICIAL_ARENAS} from './shared/official-arenas.js';
 import {publicRoomListing} from './room-listing.js';
 import { createEndpoint, createRouter, defineRoom, defineServer, matchMaker } from "colyseus";
 import { metricsSnapshot } from "./metrics.js";
@@ -18,8 +19,8 @@ const server = defineServer({
       service: "blockrush-server"
     })),
     metrics: createEndpoint("/metrics", { method: "GET" }, async () => metricsSnapshot()),
-    devRooms: createEndpoint("/dev/rooms", {method:"GET"}, async () => ({region:"FRA",capabilities:{editorMaps:true,roomDetails:true},rooms:(await matchMaker.query({name:ENV_CONFIG.environments.dev.roomName,private:false,unlisted:false})).map(room=>publicRoomListing(room)).filter(Boolean)})),
-    rooms: createEndpoint("/rooms", {method:"GET"}, async () => ({region:"FRA",rooms:(await matchMaker.query({name:ENV_CONFIG.environments.live.roomName,private:false,unlisted:false})).map(room=>publicRoomListing(room)).filter(Boolean)}))
+    devRooms: createEndpoint("/dev/rooms", {method:"GET"}, async () => ({region:"FRA",capabilities:{editorMaps:true,roomDetails:true,officialArenas:Object.keys(OFFICIAL_ARENAS)},rooms:(await matchMaker.query({name:ENV_CONFIG.environments.dev.roomName,private:false,unlisted:false})).map(room=>publicRoomListing(room)).filter(Boolean)})),
+    rooms: createEndpoint("/rooms", {method:"GET"}, async () => ({region:"FRA",capabilities:{officialArenas:Object.keys(OFFICIAL_ARENAS)},rooms:(await matchMaker.query({name:ENV_CONFIG.environments.live.roomName,private:false,unlisted:false})).map(room=>publicRoomListing(room)).filter(Boolean)}))
   }, {onRequest:async (request:Request) => {try {const preflight=corsPreflight(request);if(preflight)return preflight;requestAdmission(request);} catch {return Response.json({error:"Environment authorization failed."},{status:403});}}})
 });
 
