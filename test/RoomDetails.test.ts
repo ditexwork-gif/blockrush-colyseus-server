@@ -4,7 +4,7 @@ import {boot,type ColyseusTestServer} from '@colyseus/testing';
 import {Client} from '@colyseus/sdk';
 import {matchMaker} from 'colyseus';
 import app from '../src/app.config.js';
-import {sanitizeRoomName,publicRoomListing} from '../src/room-listing.js';
+import {sanitizeDisplayName,sanitizeRoomName,publicRoomListing} from '../src/room-listing.js';
 import {createStarterMap} from '../src/shared/map-schema.js';
 import {networkMapIdentity} from '../src/shared/network-map.js';
 
@@ -17,6 +17,20 @@ describe('Public room details',()=>{
  before(async()=>{previous=process.env.DEV_SESSION_SECRET;process.env.DEV_SESSION_SECRET=secret;server=await boot(app)});
  after(async()=>{await server.shutdown();if(previous===undefined)delete process.env.DEV_SESSION_SECRET;else process.env.DEV_SESSION_SECRET=previous});
  beforeEach(async()=>{await server.cleanup()});
+ it('preserves 20-character dotted CrazyGames names in player state and room listings',async()=>{
+  const name='Crazy.Player.Name123';
+  assert.equal(name.length,20);
+  assert.equal(sanitizeDisplayName(name+'EXTRA'),name);
+  assert.equal(sanitizeDisplayName('<>\u202e\n'), 'FIGHTER');
+  assert.equal(sanitizeDisplayName(null), 'FIGHTER');
+  const sdk=new Client(server.sdk.getHttpEndpoint('/'),{headers:{Origin:'https://blockrift.game-files.crazygames.com'}});
+  const a=await sdk.create('blockrush',{public:true,name:name+'EXTRA'});
+  const r:any=server.getRoomById(a.roomId);
+  assert.equal(r.arena.players.find((p:any)=>p.id===a.sessionId).name,name);
+  const row=(await listing()).rooms.find((v:any)=>v.roomId===a.roomId);
+  assert.deepEqual(row.connectedPlayers,[name]);assert.equal(row.name,name+"'s match");
+  await a.leave();
+ });
  it('sanitizes room titles and bounds their length, including control/bidi characters',()=>{assert.equal(sanitizeRoomName('<img src=x> Alpha\u202e\n  Beta!'),'Alpha Beta');assert.equal(sanitizeRoomName('A'.repeat(100)).length,48);assert.equal(sanitizeRoomName({}), '');});
  it('defaults to the host display name, lists human names only and whitelists response fields',async()=>{
   const a=await client().create('blockrush',{public:true,name:'<b>HOST</b>'}),r:any=server.getRoomById(a.roomId);

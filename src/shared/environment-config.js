@@ -6,7 +6,8 @@ export const ENV_CONFIG={
     "live": {
       "hosts": [
         "blockrift.io",
-        "blockrush-arena.dimitrigvianishvili.chatgpt.site"
+        "blockrush-arena.dimitrigvianishvili.chatgpt.site",
+        "blockrift.game-files.crazygames.com"
       ],
       "serverUrl": "https://de-fra-ae0a271a.colyseus.cloud",
       "roomName": "blockrush",

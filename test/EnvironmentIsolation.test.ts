@@ -12,6 +12,20 @@ describe('BLOCKRIFT server environment isolation',()=>{
  before(async()=>{previous=process.env.DEV_SESSION_SECRET;process.env.DEV_SESSION_SECRET=secret;server=await boot(app)});
  after(async()=>{await server.shutdown();if(previous===undefined)delete process.env.DEV_SESSION_SECRET;else process.env.DEV_SESSION_SECRET=previous});
  beforeEach(async()=>{await server.cleanup()});
+ it('admits only the exact CrazyGames LIVE host and preserves DEV isolation',()=>{
+  const origin='https://blockrift.game-files.crazygames.com';
+  assert.equal(requestEnvironment(origin),'live');
+  for(const invalid of ['https://other.game-files.crazygames.com',origin+'.evil.test','http://blockrift.game-files.crazygames.com',origin+':444',origin+'/'])assert.throws(()=>requestEnvironment(invalid));
+  requestAdmission(new Request('https://server/rooms',{headers:{origin}}));
+  assert.throws(()=>requestAdmission(new Request('https://server/dev/rooms',{headers:{origin,authorization:'Bearer '+token()}})));
+  for(const method of ['create','join','joinOrCreate','joinById','reconnect']){
+   const byId=['joinById','reconnect'].includes(method);
+   requestAdmission(new Request('https://server/matchmake/'+method+'/'+(byId?'ABC234':'blockrush'),{headers:{origin}}));
+   assert.throws(()=>requestAdmission(new Request('https://server/matchmake/'+method+'/'+(byId?'dev_ABC234':'dev_blockrush'),{headers:{origin,authorization:'Bearer '+token()}})));
+  }
+  assert.equal(upgradeAdmission(new Request('https://server/process/ABC234'),{headers:new Headers({origin})}),undefined);
+  assert.equal(upgradeAdmission(new Request('https://server/process/dev_ABC234'),{headers:new Headers({origin}),token:token()})?.status,403);
+ });
  it('requires signed, unexpired, origin-bound DEV authorization',()=>{
   assert.equal(requestEnvironment(liveOrigin),'live');assert.equal(requestEnvironment(devOrigin),'dev');
   assert.throws(()=>requestEnvironment(devOrigin+'.evil.test'));

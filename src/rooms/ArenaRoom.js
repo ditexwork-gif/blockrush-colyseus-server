@@ -61,7 +61,7 @@ function gunsFor(player) {
 
 function cleanName(value) {
   if (typeof value !== "string") return "FIGHTER";
-  return value.replace(/[^a-zA-Z0-9 _-]/g, "").trim().slice(0, 16) || "FIGHTER";
+  return value.replace(/[^a-zA-Z0-9 ._-]/g, "").trim().slice(0, 20) || "FIGHTER";
 }
 
 function makeRoomCode() {

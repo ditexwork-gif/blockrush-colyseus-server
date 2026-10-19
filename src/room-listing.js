@@ -1,5 +1,5 @@
 // Public presentation only. Never return player sessions, IPs or auth material.
-export function sanitizeDisplayName(value){return typeof value==='string'?value.replace(/[^a-zA-Z0-9 _-]/g,'').trim().slice(0,16)||'FIGHTER':'FIGHTER';}
+export function sanitizeDisplayName(value){return typeof value==='string'?value.replace(/[^a-zA-Z0-9 ._-]/g,'').trim().slice(0,20)||'FIGHTER':'FIGHTER';}
 export function sanitizeRoomName(value){return typeof value==='string'?Array.from(value.replace(/<[^>]*>/g,'').replace(/[^\p{L}\p{N} _.'’()\-]/gu,'').replace(/\s+/g,' ').trim()).slice(0,48).join(''):'';}
 export const defaultRoomName=name=>sanitizeDisplayName(name)+"'s match";
 export function publicRoomListing(room,now=Date.now()){
