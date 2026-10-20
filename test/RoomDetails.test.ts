@@ -17,7 +17,7 @@ describe('Public room details',()=>{
  before(async()=>{previous=process.env.DEV_SESSION_SECRET;process.env.DEV_SESSION_SECRET=secret;server=await boot(app)});
  after(async()=>{await server.shutdown();if(previous===undefined)delete process.env.DEV_SESSION_SECRET;else process.env.DEV_SESSION_SECRET=previous});
  beforeEach(async()=>{await server.cleanup()});
- it('preserves 20-character dotted CrazyGames names in player state and room listings',async()=>{
+ it('preserves 20-character dotted CrazyGames names through state, snapshots, listings and kill events',async()=>{
   const name='Crazy.Player.Name123';
   assert.equal(name.length,20);
   assert.equal(sanitizeDisplayName(name+'EXTRA'),name);
@@ -29,7 +29,32 @@ describe('Public room details',()=>{
   assert.equal(r.arena.players.find((p:any)=>p.id===a.sessionId).name,name);
   const row=(await listing()).rooms.find((v:any)=>v.roomId===a.roomId);
   assert.deepEqual(row.connectedPlayers,[name]);assert.equal(row.name,name+"'s match");
-  await a.leave();
+  const victimName='Other.Player.Name123';assert.equal(victimName.length,20);
+  const b=await sdk.joinById(a.roomId,{name:victimName+'EXTRA'});
+  const shooter=r.arena.players.find((p:any)=>p.id===a.sessionId),target=r.arena.players.find((p:any)=>p.id===b.sessionId);
+  assert.equal(shooter.name,name);assert.equal(target.name,victimName);
+  assert.equal(r.state.players.get(a.sessionId).name,name);assert.equal(r.state.players.get(b.sessionId).name,victimName);
+  assert.deepEqual((await listing()).rooms.find((v:any)=>v.roomId===a.roomId).connectedPlayers,[name,victimName]);
+  const waitFor=async(check:()=>boolean,label:string)=>{const deadline=performance.now()+2000;while(!check()&&performance.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));assert.ok(check(),label);};
+  shooter.pose={...shooter.pose,x:0,y:0,z:12,yaw:0,pitch:0};target.pose={...target.pose,x:0,y:0,z:10,yaw:Math.PI,pitch:0};
+  for(const bot of r.arena.players.filter((p:any)=>p.bot)){bot.pose={...bot.pose,x:-28,z:-28};bot.nextBotFire=Date.now()+5000;}
+  target.hp=1;shooter.fireCredit=1000;shooter.fireAt=Date.now();shooter.lastInput.aiming=true;
+  for(const p of [shooter,target])p.history=[{tick:r.arena.tick,at:Date.now(),pose:{...p.pose}}];
+  const packet=new Uint8Array(13),view=new DataView(packet.buffer);view.setUint32(0,1,true);view.setUint32(4,r.arena.tick,true);
+  a.send('f',packet);
+  await waitFor(()=>r.arena.events.some((e:any)=>e.type==='kill'&&e.player===a.sessionId&&e.target===b.sessionId),'authoritative finishing shot');
+  const kill=r.arena.events.find((e:any)=>e.type==='kill'&&e.player===a.sessionId&&e.target===b.sessionId);
+  assert.equal(kill.killer,name);assert.equal(kill.victim,victimName);
+  const snapshot:any=await a.request('snapshot',{});
+  assert.equal(snapshot.room.players.find((p:any)=>p.id===a.sessionId).name,name);
+  assert.equal(snapshot.room.players.find((p:any)=>p.id===b.sessionId).name,victimName);
+  const snapshotKill=snapshot.room.events.find((e:any)=>e.seq===kill.seq);
+  assert.equal(snapshotKill.killer,name);assert.equal(snapshotKill.victim,victimName);
+  await waitFor(()=>Array.from((a.state as any).events??[]).some((e:any)=>e.seq===kill.seq),'client receives kill schema event');
+  assert.equal((a.state as any).players.get(a.sessionId).name,name);assert.equal((a.state as any).players.get(b.sessionId).name,victimName);
+  const netKill=Array.from((a.state as any).events).find((e:any)=>e.seq===kill.seq) as any;
+  assert.equal(netKill.killer,name);assert.equal(netKill.victim,victimName);
+  await b.leave();await a.leave();
  });
  it('sanitizes room titles and bounds their length, including control/bidi characters',()=>{assert.equal(sanitizeRoomName('<img src=x> Alpha\u202e\n  Beta!'),'Alpha Beta');assert.equal(sanitizeRoomName('A'.repeat(100)).length,48);assert.equal(sanitizeRoomName({}), '');});
  it('defaults to the host display name, lists human names only and whitelists response fields',async()=>{

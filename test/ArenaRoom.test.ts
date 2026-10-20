@@ -126,7 +126,10 @@ describe("BLOCKRIFT realtime room", () => {
     const started = await host.request("start", {});
     const self = started.room.players.find((player: any) => player.id === host.sessionId), before = self.pose.z;
     for (let seq = 1; seq <= 6; seq++) host.send("i", inputPacket(seq));
-    await wait();
+    const player = room.arena.players.find((value: any) => value.id === host.sessionId);
+    const deadline = performance.now() + 2000;
+    while (player.ackInput !== 6 && performance.now() < deadline) await wait(20);
+    assert.equal(player.ackInput, 6, `ack=${player.ackInput}, queued=${player.pendingInputs.length}, tick=${room.arena.tick}`);
     const updated = await host.request("snapshot", {});
     assert.equal(updated.room.self.ackInput, 6);
     assert.ok(updated.room.players.find((player: any) => player.id === host.sessionId).pose.z < before);
@@ -333,21 +336,37 @@ describe("BLOCKRIFT realtime room", () => {
     await host.request("start", {});
     return { room, host, player: room.arena.players.find((p: any) => p.id === host.sessionId) };
   }
-  async function run(dtTicks: number) {
-    const { host, player } = await startedRoom();
-    player.pose = { ...player.pose, x: 0, y: 1.2, z: 28, vx: 0, vy: 0, vz: 0, grounded: true };
-    let seq = 0, distance = 0, last = { x: player.pose.x, z: player.pose.z };
-    const started = Date.now();
-    while (Date.now() - started < 1500) {
-      host.send("i", timedInputPacket(++seq, dtTicks, Math.PI / 2)); await wait(16);
-      distance += Math.hypot(player.pose.x - last.x, player.pose.z - last.z); last = { x: player.pose.x, z: player.pose.z };
-    }
-    return distance;
-  }
-
   it("does not let inflated dtTicks move a player faster than real time", async () => {
-    const honest = await run(1), cheating = await run(3);
-    assert.ok(cheating < honest * 1.35, `dtTicks=3 travelled ${cheating.toFixed(1)} m against ${honest.toFixed(1)} m`);
+    const { room, player } = await startedRoom();
+    room.setSimulationInterval();
+    const ticks = 90, reserve = 10;
+    const initial = structuredClone(player);
+    initial.pose = { ...initial.pose, x: 25, y: 0, z: 12, vx: 0, vy: 0, vz: 0, grounded: true, slide: 0 };
+    initial.pendingInputs = []; initial.simBudget = reserve; initial.ackInput = 0;
+    initial.lastInput = { ...initial.lastInput, fwd: 0, right: 0, yaw: 0, pitch: 0, sprint: false, aiming: false };
+    // Equal simulated time and identical fixtures remove wall-clock/socket jitter.
+    // Real delivery and acknowledgments remain covered by the socket tests above.
+    for (const cadence of [1, 3, 9]) {
+      const run = (dtTicks: number) => {
+        const p = structuredClone(initial);
+        let seq = 0, distance = 0;
+        for (let tick = 0; tick < ticks; tick++) {
+          if (tick % cadence === 0) for (let packet = 0; packet < cadence; packet++) {
+            p.pendingInputs.push({ seq: ++seq, dtTicks, fwd: 1, right: 0, jump: false, slidePressed: false, sprint: false, aiming: false, yaw: 0, pitch: 0, weapon: 0 });
+          }
+          const before = { x: p.pose.x, z: p.pose.z };
+          room.stepPlayer(p, tick * 1000 / 60);
+          distance += Math.hypot(p.pose.x - before.x, p.pose.z - before.z);
+          assert.ok(p.simBudget >= 0 && p.simBudget <= reserve);
+        }
+        assert.equal(p.ackInput, seq); assert.equal(p.pendingInputs.length, 0);
+        return distance;
+      };
+      const honest = run(1), cheating = run(3);
+      assert.ok(honest > 8, 'fixture must actually move through open space');
+      assert.ok(cheating < honest * 1.35, `cadence=${cadence}: dtTicks=3 travelled ${cheating} m against ${honest} m`);
+      assert.ok(cheating <= byId['AR-30'].speed * (ticks + reserve) / 60 + 1e-8, 'movement cannot exceed elapsed ticks plus initial catch-up reserve');
+    }
   });
 
   it("does not let a player bank a second of fire rate and dump it in one frame", async () => {

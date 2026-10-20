@@ -12,6 +12,18 @@ describe('BLOCKRIFT server environment isolation',()=>{
  before(async()=>{previous=process.env.DEV_SESSION_SECRET;process.env.DEV_SESSION_SECRET=secret;server=await boot(app)});
  after(async()=>{await server.shutdown();if(previous===undefined)delete process.env.DEV_SESSION_SECRET;else process.env.DEV_SESSION_SECRET=previous});
  beforeEach(async()=>{await server.cleanup()});
+ it('serves the exact CrazyGames origin over HTTP and rejects other portal hosts',async()=>{
+  const endpoint=server.sdk.getHttpEndpoint('/'),origin='https://blockrift.game-files.crazygames.com';
+  for(const allowed of [origin,liveOrigin,'https://blockrift.io']){
+   const response=await fetch(endpoint+'rooms',{headers:{Origin:allowed}});assert.equal(response.status,200);assert.deepEqual((await response.json()).rooms,[]);
+  }
+  const preflight=await fetch(endpoint+'rooms',{method:'OPTIONS',headers:{Origin:origin,'Access-Control-Request-Method':'GET'}});
+  assert.equal(preflight.status,204);assert.equal(preflight.headers.get('access-control-allow-origin'),origin);
+  for(const denied of ['https://other.game-files.crazygames.com',origin+'.evil.test','http://blockrift.game-files.crazygames.com']){
+   assert.equal((await fetch(endpoint+'rooms',{headers:{Origin:denied}})).status,403);
+  }
+  assert.equal((await fetch(endpoint+'dev/rooms',{headers:{Origin:origin}})).status,403);
+ });
  it('admits only the exact CrazyGames LIVE host and preserves DEV isolation',()=>{
   const origin='https://blockrift.game-files.crazygames.com';
   assert.equal(requestEnvironment(origin),'live');
