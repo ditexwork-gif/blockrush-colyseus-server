@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {prepareNetworkMap} from '../shared/network-map.js';
 import { Room } from "colyseus";
 import {admit} from "../environment-admission.js";
-import { ARENA_SOLIDS, DEPOT_SOLIDS, simulateMovement } from "../shared/movement.js";
+import { ARENA_SOLIDS, DEPOT_SOLIDS, simulateMovement, movementSpeed } from "../shared/movement.js";
 import { byId, damageAtRange } from "../shared/weapons.js";
 import { inputMessage, playerJoined, playerLeft, recordTick, roomCreated, roomDisposed } from "../metrics.js";
 import { ArenaState, NetEvent, PlayerNetState } from "./schema.js";
@@ -101,6 +101,7 @@ function spawn(arena, player, now) {
   player.lastInputAt = now;
   player.inputCredit = 50;
   player.simBudget = SIM_BUDGET_MAX;
+  player.teleportedAtTick=-1;player.pose.time=(arena.tick||0)/60;player.pose.riftSerial=0;player.pose.riftCooldownUntil=0;
   player.history = [{ at: now, tick: arena.tick || 0, pose: { ...player.pose } }];
 }
 
@@ -148,12 +149,12 @@ function makeBot(arena, now) {
 
 function humans(arena){return arena.players.filter(player=>!player.bot)}
 function fillBots(arena, state, now, target=6){
-  while(arena.players.length<target){const bot=makeBot(arena,now);arena.players.push(bot);state.players.set(bot.id,new PlayerNetState())}
+  while(arena.players.filter(p=>p.bot||p.connected!==false).length<target&&arena.players.length<8){const bot=makeBot(arena,now);arena.players.push(bot);state.players.set(bot.id,new PlayerNetState())}
 }
 
 function tick(arena, now) {
   arena.tickAt = now;
-  if (!arena.players.some(player => player.id === arena.hostId)) arena.hostId = arena.players[0]?.id || null;
+  if (!arena.players.some(player => player.id === arena.hostId&&player.connected!==false&&!player.bot)) arena.hostId = arena.players.find(p=>!p.bot&&p.connected!==false)?.id || null;
   if (arena.phase === "playing") tickProjectiles(arena, now);
   if (arena.phase === "playing" && now >= arena.endsAt) arena.phase = "finished";
   for (const player of arena.players) {
@@ -190,7 +191,7 @@ function publicRoom(arena, now, player) {
     players: arena.players.map(value => ({
       id: value.id,
       name: value.name,
-      bot: !!value.bot,
+      bot: !!value.bot,connected:value.connected!==false,
       pose: value.pose,
       hp: value.hp,
       alive: value.alive,
@@ -226,7 +227,8 @@ function rayBox(origin, direction, min, max) {
   return near;
 }
 
-function historicalPoseAtTick(player, at) {
+export function historicalPoseAtTick(player, at) {
+  if(player.teleportedAtTick>=0&&at<player.teleportedAtTick)return null;
   const history = player.history || [];
   if (!history.length) return player.pose;
   let closest = history[0];
@@ -302,6 +304,7 @@ function damagePlayer(arena, player, target, damage, head, now, action = {}, end
 function worldDistance(arena, origin, direction, maxDistance = 220) {
   let distance = maxDistance;
   for (const solid of arena.geometry?.solids || WALLS[arena.map] || WALLS.foundry) {
+    if(solid.shoot===false||solid.kind==='ladder')continue;
     distance = Math.min(distance, arena.geometry ? mapRayDistance(solid,origin,direction,maxDistance) : rayBox(
       origin,direction,
       {x:solid.x-solid.w/2,y:solid.bottom,z:solid.z-solid.d/2},
@@ -376,7 +379,7 @@ function shoot(arena, player, action, now) {
     let targets = [];
     for (const target of arena.players) {
       if (target.id === player.id || !target.alive || (arena.mode === "tdm" && target.team === player.team)) continue;
-      const pose = historicalPoseAtTick(target, rewindTick);
+      const pose = historicalPoseAtTick(target, rewindTick);if(!pose)continue;
       const height = pose.slide ? 1.2 : 1.9;
       const hit = rayBox(origin, ray,
         { x: pose.x - 0.45, y: pose.y, z: pose.z - 0.45 },
@@ -489,6 +492,7 @@ export class ArenaRoom extends Room {
   };
 
   async onCreate(options) {
+    if(options?.v!==undefined&&Number(options.v)<116)throw Error("Please reload BLOCKRIFT: this server needs client v116 or later.");
     if(options?.map==="custom"&&this.constructor.environment!=="dev")throw Error("Editor-map multiplayer is currently DEV-only.");
     const official=officialArena(options?.map);
     if(official&&(options.mapData!==undefined||options.mapHash!==undefined))throw Error("Official arena geometry is server-owned.");
@@ -510,6 +514,7 @@ export class ArenaRoom extends Room {
     this.customRoomName=sanitizeRoomName(options?.roomName);
     this.metadata = { name:this.customRoomName||defaultRoomName(options?.name),roundTimeSeconds:MATCH_MS/1000, map, mapHash, mapName: prepared?.map.name || map, mode, public: publicRoom, phase: "waiting", region: "FRA" };
     this.arena = {
+      movementVersion:2,
       code: this.roomId,
       map,
       mapHash, mapData: prepared?.map || null, geometry: prepared || null,
@@ -525,6 +530,7 @@ export class ArenaRoom extends Room {
       eventSeq: 0,
       projectiles: []
     };
+    this.arena.rifts=(prepared?.map.objects||[]).filter(o=>o.type==='rift').map(o=>({...o,y:o.y+(prepared?.offset||0)}));
     if(prepared)this.metadata.mapPreview={width:prepared.map.width,depth:prepared.map.depth,shapes:prepared.solids.map(({x,z,w,d,top,yaw=0})=>({x,z,w,d,top,yaw}))};
     this.arena.tick = 0;
     this.arena.botSerial = 0;
@@ -549,7 +555,9 @@ export class ArenaRoom extends Room {
 
   // Per-address connection and join-rate limits. Runs before onJoin.
   onAuth(client, options, context) {
+    if(options?.v!==undefined&&Number(options.v)<116)throw Error("Please reload BLOCKRIFT: this server needs client v116 or later.");
     admit(this.environment,context?.headers?.get?.("origin"),context?.token);
+    if(this.metadata.public&&this.arena.players.length&&!this.connectedHumans().some(p=>p.id===this.arena.hostId))throw Error("Room is reconnecting. Retry Quick Play.");
     const ip = clientIp(context), now = Date.now();
     if (!limitedIp(ip)) return { ip: "" };
     const joins = ipJoins.get(ip);
@@ -576,9 +584,17 @@ export class ArenaRoom extends Room {
     return !player || this.countMessage(player, Date.now(), "action");
   }
 
+  connectedHumans(){return this.arena.players.filter(p=>!p.bot&&this.connectedDisplayIds.has(p.id));}
+  reconcileConnections(){
+    const connected=this.connectedHumans();
+    if(!connected.some(p=>p.id===this.arena.hostId))this.arena.hostId=connected[0]?.id||null;
+    if(!connected.length){clearTimeout(this.quickStartTimer);this.quickStartTimer=null;this.arena.quickStartsAt=0;if(this.metadata.public)void this.lock();}
+    else if(this.metadata.public&&this.clients.length<this.maxClients&&this.arena.phase!=='finished')void this.unlock();
+    if(connected.length&&this.metadata.public&&this.arena.phase==='waiting'&&!this.quickStartTimer){this.arena.quickStartsAt=Date.now()+PUBLIC_START_MS;this.quickStartTimer=setTimeout(()=>{this.quickStartTimer=null;if(this.connectedHumans().length&&this.arena.phase==='waiting')this.beginMatch(Date.now(),true);},PUBLIC_START_MS);}
+  }
   syncListing(){
     if(!this.metadata.public)return;
-    void this.setMetadata({...this.metadata,phase:this.arena.phase,endsAt:this.arena.endsAt,botCount:this.arena.players.filter(p=>p.bot).length,connectedPlayers:this.arena.players.filter(p=>!p.bot&&this.connectedDisplayIds.has(p.id)).map(p=>p.name)});
+    void this.setMetadata({...this.metadata,connectedHumans:this.connectedHumans().length,matchHealthy:this.connectedHumans().some(p=>p.id===this.arena.hostId)&&this.arena.phase!=="finished",phase:this.arena.phase,endsAt:this.arena.endsAt,botCount:this.arena.players.filter(p=>p.bot).length,connectedPlayers:this.arena.players.filter(p=>!p.bot&&this.connectedDisplayIds.has(p.id)).map(p=>p.name)});
   }
 
   onJoin(client, options) {
@@ -588,26 +604,26 @@ export class ArenaRoom extends Room {
       const bot=this.arena.players.find(value=>value.bot);
       if(bot){this.arena.players=this.arena.players.filter(value=>value!==bot);this.state.players.delete(bot.id)}
     }
-    const player = makePlayer(this.arena, client.sessionId, options?.name, now);
+    const player = makePlayer(this.arena, client.sessionId, options?.name, now);player.connected=true;
     player.classIndex=clamp(Math.floor(Number(options?.classIndex)||0),0,4);
     this.arena.players.push(player);
     if (!this.arena.hostId){this.arena.hostId = player.id;if(!this.customRoomName)this.metadata.name=defaultRoomName(player.name);}
-    this.connectedDisplayIds.add(client.sessionId);
+    this.connectedDisplayIds.add(client.sessionId);this.reconcileConnections();
     this.arena.revision++;
     this.state.players.set(player.id, new PlayerNetState());
     playerJoined();
     if(this.metadata.public && this.arena.phase==="waiting"){
-      if(humans(this.arena).length>=2)this.beginMatch(now,true);
+      if(this.connectedHumans().length>=2)this.beginMatch(now,true);
       else if(!this.quickStartTimer){
         this.arena.quickStartsAt=now+PUBLIC_START_MS;
-        this.quickStartTimer=setTimeout(()=>{this.quickStartTimer=null;if(this.arena.phase==="waiting"&&humans(this.arena).length)this.beginMatch(Date.now(),true)},PUBLIC_START_MS);
+        this.quickStartTimer=setTimeout(()=>{this.quickStartTimer=null;if(this.arena.phase==="waiting"&&this.connectedHumans().length)this.beginMatch(Date.now(),true)},PUBLIC_START_MS);
       }
     }
     this.syncState(now);this.syncListing();
   }
 
   onDrop(client) {
-    this.connectedDisplayIds.delete(client.sessionId);this.syncListing();
+    this.connectedDisplayIds.delete(client.sessionId);const dropped=this.playerFor(client);if(dropped)dropped.connected=false;this.reconcileConnections();this.syncState(Date.now());this.syncListing();
     const player = this.playerFor(client);
     if (player) {
       player.pendingInputs.length = 0;
@@ -620,7 +636,7 @@ export class ArenaRoom extends Room {
   }
 
   onReconnect(client) {
-    this.connectedDisplayIds.add(client.sessionId);this.syncListing();
+    this.connectedDisplayIds.add(client.sessionId);const restored=this.playerFor(client);if(restored)restored.connected=true;this.reconcileConnections();this.syncListing();
     const player = this.playerFor(client);
     if (player) {
       player.lastInputAt = Date.now();
@@ -633,8 +649,8 @@ export class ArenaRoom extends Room {
     this.connectedDisplayIds.delete(client.sessionId);
     this.releaseIp(client);
     this.arena.players = this.arena.players.filter(player => player.id !== client.sessionId);
-    if (this.arena.hostId === client.sessionId) this.arena.hostId = humans(this.arena)[0]?.id || null;
-    this.arena.revision++;
+    if (this.arena.hostId === client.sessionId) this.arena.hostId = this.connectedHumans()[0]?.id || null;
+    this.reconcileConnections();this.arena.revision++;
     this.state.players.delete(client.sessionId);
     playerLeft();
     const now=Date.now();
@@ -672,7 +688,7 @@ export class ArenaRoom extends Room {
 
   snapshotFor(client) {
     const now = Date.now();
-    return {...publicRoom(this.arena, now, this.playerFor(client)),mapHash:this.arena.mapHash,mapData:this.arena.mapData};
+    return {...publicRoom(this.arena, now, this.playerFor(client)),movementVersion:this.arena.movementVersion,mapHash:this.arena.mapHash,mapData:this.arena.mapData};
   }
 
   step() {
@@ -782,6 +798,7 @@ export class ArenaRoom extends Room {
 
   stepPlayer(player, now) {
     if (!player.alive || this.arena.phase !== "playing") return;
+    const priorPose=player.pose;
     const q = player.pendingInputs, count = Math.min(q.length, q.length > 6 ? 3 : 1);
     // Movement time budget: one tick of movement is earned per server tick, with a small
     // reserve for lag catch-up. Without it a client could send dtTicks = 3 on every packet
@@ -789,24 +806,25 @@ export class ArenaRoom extends Room {
     player.simBudget = Math.min(SIM_BUDGET_MAX, (Number.isFinite(player.simBudget) ? player.simBudget : SIM_BUDGET_MAX) + 1);
     if (!count) {
       player.simBudget = Math.max(0, player.simBudget - 1);
-      const held = { ...player.lastInput, jump:false, slidePressed:false, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{geometryVersion:3,solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
-      player.pose = simulateMovement(player.pose, held, TICK);
+      const held = { ...player.lastInput, jump:false, slidePressed:false, canClimb:!player.bot,alwaysRun:true,botSprint:player.bot&&player.lastInput.sprint===true,speed:movementSpeed(gunsFor(player)[player.weapon].speed,true),rifts:player.bot?[]:this.arena.rifts, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{geometryVersion:3,solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
+      const before=player.pose;player.pose = simulateMovement(player.pose, held, TICK);if(player.pose.riftSerial>before.riftSerial)player.lastInput.yaw=player.pose.yaw;
     }
     for (let index=0; index<count; index++) {
       const input = q.shift();
       if (Number.isInteger(input.weapon) && gunsFor(player)[input.weapon] && input.weapon !== player.weapon && this.arena.mode !== "gun") {
         player.weapon = input.weapon; player.reloadEnd = 0; player.swapUntil = now + 350;
       }
-      const clean = { ...input, speed:gunsFor(player)[player.weapon].speed, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{geometryVersion:3,solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
+      const clean = { ...input, canClimb:!player.bot,alwaysRun:true,botSprint:player.bot&&player.lastInput.sprint===true,speed:movementSpeed(gunsFor(player)[player.weapon].speed,true),rifts:player.bot?[]:this.arena.rifts, adsMoveMult:gunsFor(player)[player.weapon].adsMoveMult, map:this.arena.map, ...(this.arena.geometry?{geometryVersion:3,solids:this.arena.geometry.solids,bounds:this.arena.geometry.bounds}:{}) };
       const before = player.pose;
       const steps = Math.min(input.dtTicks, Math.floor(player.simBudget));
       player.simBudget -= steps;
       for (let step=0; step<steps; step++) player.pose = simulateMovement(player.pose, { ...clean, jump:step===0&&clean.jump, slidePressed:step===0&&clean.slidePressed }, TICK);
       if (![player.pose.x,player.pose.y,player.pose.z,player.pose.vx,player.pose.vy,player.pose.vz].every(Number.isFinite)) { player.pose=before; player.strikes++; }
-      player.pose.yaw = clean.yaw; player.pose.pitch = clamp(clean.pitch,-1.45,1.45);
-      player.lastInput = { ...clean, jump:false, slidePressed:false };
+      player.pose.yaw = player.pose.riftSerial>before.riftSerial?player.pose.yaw:clean.yaw; player.pose.pitch = clamp(clean.pitch,-1.45,1.45);
+      player.lastInput = { ...clean,yaw:player.pose.yaw, jump:false, slidePressed:false };
       player.ackInput = input.seq;
     }
+    if((player.pose.riftSerial||0)>(priorPose.riftSerial||0)){player.history=[];player.teleportedAtTick=this.arena.tick;addEvent(this.arena,{type:'rift',player:player.id,from:{x:priorPose.x,y:priorPose.y,z:priorPose.z},pos:{x:player.pose.x,y:player.pose.y,z:player.pose.z}});}
     player.history.push({ tick:this.arena.tick, at:now, pose:{...player.pose} });
     player.history = player.history.slice(-60);
   }
@@ -824,7 +842,7 @@ export class ArenaRoom extends Room {
 
   syncState(now) {
     const state=this.state, arena=this.arena;
-    state.mapHash=arena.mapHash; state.code=arena.code; state.map=arena.map; state.mode=arena.mode; state.hostId=arena.hostId||"";
+    state.movementVersion=arena.movementVersion;state.mapHash=arena.mapHash; state.code=arena.code; state.map=arena.map; state.mode=arena.mode; state.hostId=arena.hostId||"";
     state.phase=arena.phase==="waiting"?0:arena.phase==="playing"?1:2; state.tick=arena.tick; state.round=arena.round;
     state.startsIn=arena.phase==="waiting"&&arena.quickStartsAt?clamp(Math.ceil((arena.quickStartsAt-now)/1000),0,255):0;
     state.endsAtTick=arena.phase==="playing"?arena.tick+Math.max(0,Math.ceil((arena.endsAt-now)/TICK_MS)):arena.tick;
@@ -834,7 +852,7 @@ export class ArenaRoom extends Room {
       const p=player.pose, q=value=>clamp(Math.round((Number(value)||0)*100),-32768,32767);
       net.name=player.name; net.bot=!!player.bot; net.x=q(p.x); net.y=q(p.y); net.z=q(p.z); net.vx=q(p.vx); net.vy=q(p.vy); net.vz=q(p.vz);
       net.yawQ=clamp(Math.round(angleDelta(p.yaw,0)/Math.PI*127),-127,127); net.pitchQ=clamp(Math.round((p.pitch||0)/1.45*127),-127,127);
-      net.hp=clamp(Math.round(player.hp),0,100); net.flags=(player.alive?1:0)|(p.grounded?2:0)|(p.slide?4:0)|(player.lastInput?.aiming?8:0)|(player.reloadEnd?16:0);
+      net.ladderDetachTick=Math.ceil((p.ladderDetachUntil||0)*60);net.movementTimeTick=Math.round((p.time||0)*60);net.riftSerial=p.riftSerial||0;net.riftCooldownTick=Math.ceil((p.riftCooldownUntil||0)*60);net.hp=clamp(Math.round(player.hp),0,100); net.flags=(player.alive?1:0)|(p.grounded?2:0)|(p.slide?4:0)|(player.lastInput?.aiming?8:0)|(player.reloadEnd?16:0)|(!player.bot&&!this.connectedDisplayIds.has(player.id)?32:0);
       net.weapon=player.weapon; net.team=player.team; net.classIndex=player.classIndex; net.gunStage=player.gunStage; net.kills=player.kills; net.deaths=player.deaths; net.life=player.life; net.score=player.score;
       net.lastSeq=player.ackInput; net.lastActionSeq=player.ack; net.respawnIn=player.alive?0:clamp(Math.ceil((player.respawnAt-now)/TICK_MS),0,65535);
       net.ammo0=clamp(player.ammo?.[0]||0,0,255); net.ammo1=clamp(player.ammo?.[1]||0,0,255);
@@ -876,7 +894,7 @@ export class ArenaRoom extends Room {
     const player = this.playerFor(client);
     if (!player) throw new Error("Your room session ended. Join the room again.");
     if (player.id !== this.arena.hostId) throw new Error("Only the room host can start the match.");
-    if (!this.metadata.public && humans(this.arena).length < 2) throw new Error("Invite at least one friend before starting.");
+    if (!this.metadata.public && this.connectedHumans().length < 2) throw new Error("Invite at least one friend before starting.");
     if (this.arena.phase === "playing") return { room: this.snapshotFor(client) };
     const now = Date.now();
     this.beginMatch(now,this.metadata.public);

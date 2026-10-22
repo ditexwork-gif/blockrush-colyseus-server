@@ -1,3 +1,4 @@
+import {riftMovementSolids,traverseRifts} from './rifts.js';
 export const MOVE={groundAccel:12,groundFriction:7,airAccel:2.2,airCap:1.2,jumpVel:8.4,slideBoost:1.55,slideFriction:1.2,slideMin:.9,slideCooldown:.25,slideJumpKeep:1,softCap:1.9,bhopWindow:.12,gravity:23};
 
 export const ARENA_SOLIDS=[];
@@ -31,18 +32,22 @@ function movementFriction(state,friction,dt){const speed=Math.hypot(state.vx,sta
  * {width, depth} does not supply these fields and falls back to ±29 m.
  * Returns a new state; does not mutate the input or previous state.
  */
-export function simulateMovement(previous,input,dt){
+export function simulateMovement(previous,input,dt){const next=stepMovement(previous,{...input,solids:riftMovementSolids(previous,input)},dt);return traverseRifts(previous,next,input);}
+export const movementSpeed=(walk,alwaysRun)=>walk*(alwaysRun?1.38:1);
+export const horizontalCap=input=>movementClamp(Number(input.speed)||8.2,4,input.alwaysRun?14:12)*(input.alwaysRun?1.45:MOVE.softCap);
+function stepMovement(previous,input,dt){
  const state={...previous,x:Number(previous.x)||0,y:Number(previous.y)||0,z:Number(previous.z)||0,vx:Number(previous.vx)||0,vy:Number(previous.vy)||0,vz:Number(previous.vz)||0,grounded:previous.grounded!==false,slide:Number(previous.slide)||0,slideCooldown:Number(previous.slideCooldown)||0,slideQueued:!!previous.slideQueued,landedAt:Number.isFinite(previous.landedAt)?previous.landedAt:-99,time:Number(previous.time)||0},solids=Array.isArray(input.solids)?input.solids:input.map==='depot'?DEPOT_SOLIDS:ARENA_SOLIDS;dt=movementClamp(Number(dt)||0,0,.05);state.time+=dt;state.slide=Math.max(0,state.slide-dt);state.slideCooldown=Math.max(0,state.slideCooldown-dt);
+ if(input.canClimb!==false&&solids.some(s=>s.kind==='ladder')){const ladders=solids.filter(s=>s.kind==='ladder');const climbed=moveOnLadder(state,input,dt,ladders,solids.filter(s=>s.kind!=='ladder'));if(climbed)return climbed;}
  let forward=movementClamp(Number(input.fwd)||0,-1,1),right=movementClamp(Number(input.right)||0,-1,1);const inputLength=Math.hypot(forward,right);if(inputLength>1){forward/=inputLength;right/=inputLength}
- const yaw=Number.isFinite(input.yaw)?input.yaw:0,speed=movementClamp(Number(input.speed)||8.2,4,12),base=speed*(input.sprint?1.38:1)*(input.aiming?movementClamp(Number(input.adsMoveMult)||.65,.1,1):1);let wishX=-Math.sin(yaw)*forward+Math.cos(yaw)*right,wishZ=-Math.cos(yaw)*forward-Math.sin(yaw)*right;const wishLength=Math.hypot(wishX,wishZ);if(wishLength>0){wishX/=wishLength;wishZ/=wishLength}
- if(input.slidePressed){if(!state.grounded)state.slideQueued=true;else if(state.slideCooldown<=0){const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,speed*MOVE.softCap);state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}
+ const yaw=Number.isFinite(input.yaw)?input.yaw:0,speed=movementClamp(Number(input.speed)||8.2,4,input.alwaysRun?14:12),base=speed*((!input.alwaysRun&&input.sprint)||input.botSprint===true?1.38:1)*(input.aiming?movementClamp(Number(input.adsMoveMult)||.65,.1,1):1);let wishX=-Math.sin(yaw)*forward+Math.cos(yaw)*right,wishZ=-Math.cos(yaw)*forward-Math.sin(yaw)*right;const wishLength=Math.hypot(wishX,wishZ);if(wishLength>0){wishX/=wishLength;wishZ/=wishLength}
+ if(input.slidePressed){if(!state.grounded)state.slideQueued=true;else if(state.slideCooldown<=0){const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,horizontalCap(input));state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}
  let sliding=state.slide>0;const justLanded=state.grounded&&state.time-(Number(state.landedAt)||-99)<MOVE.bhopWindow;
  if(state.grounded){if(!(input.jump&&justLanded))movementFriction(state,sliding?MOVE.slideFriction:MOVE.groundFriction,dt);if(!sliding&&wishLength>0)movementAccelerate(state,wishX,wishZ,base,MOVE.groundAccel,dt)}else if(wishLength>0)movementAccelerate(state,wishX,wishZ,Math.min(base,MOVE.airCap),MOVE.airAccel,dt);
- let horizontalSpeed=Math.hypot(state.vx,state.vz),cap=speed*MOVE.softCap;if(horizontalSpeed>cap){state.vx*=cap/horizontalSpeed;state.vz*=cap/horizontalSpeed}
+ let horizontalSpeed=Math.hypot(state.vx,state.vz),cap=horizontalCap(input);if(horizontalSpeed>cap){state.vx*=cap/horizontalSpeed;state.vz*=cap/horizontalSpeed}
  if(input.jump&&state.grounded){state.vy=MOVE.jumpVel;state.grounded=false;if(sliding){state.slide=0;state.vx*=MOVE.slideJumpKeep;state.vz*=MOVE.slideJumpKeep;sliding=false}}
  if(input.map==='custom'||input.geometryVersion===3)return moveGeometryV3(state,input,dt,solids);
  const height=state.slide>0?1.2:1.8,dx=state.vx*dt,dz=state.vz*dt;if(!movementBlocked(state.x+dx,state.z,.33,state.y,height,solids))state.x+=dx;else state.vx=0;if(!movementBlocked(state.x,state.z+dz,.33,state.y,height,solids))state.z+=dz;else state.vz=0;const halfWidth=movementClamp(Number(input.bounds?.halfWidth)||29,10,100),halfDepth=movementClamp(Number(input.bounds?.halfDepth)||29,10,100);state.x=movementClamp(state.x,-halfWidth,halfWidth);state.z=movementClamp(state.z,-halfDepth,halfDepth);
- const oldY=state.y;state.vy=(Number(state.vy)||0)-MOVE.gravity*dt;state.y+=state.vy*dt;if(input.map==='custom' && state.vy>0){for(const solid of solids){if(solid.bottom>0 && oldY+height<=solid.bottom+.001 && state.y+height>solid.bottom && state.x+.33>solid.x-solid.w/2 && state.x-.33<solid.x+solid.w/2 && state.z+.33>solid.z-solid.d/2 && state.z-.33<solid.z+solid.d/2){state.y=Math.max(oldY,solid.bottom-height);state.vy=0;}}}const floor=movementFloorAt(state.x,state.z,oldY,solids);if(state.y<=floor){if(!state.grounded)state.landedAt=state.time;state.y=floor;state.vy=0;state.grounded=true;if(state.slideQueued&&state.slideCooldown<=0){state.slideQueued=false;const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,speed*MOVE.softCap);state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}else state.grounded=false;
+ const oldY=state.y;state.vy=(Number(state.vy)||0)-MOVE.gravity*dt;state.y+=state.vy*dt;if(input.map==='custom' && state.vy>0){for(const solid of solids){if(solid.bottom>0 && oldY+height<=solid.bottom+.001 && state.y+height>solid.bottom && state.x+.33>solid.x-solid.w/2 && state.x-.33<solid.x+solid.w/2 && state.z+.33>solid.z-solid.d/2 && state.z-.33<solid.z+solid.d/2){state.y=Math.max(oldY,solid.bottom-height);state.vy=0;}}}const floor=movementFloorAt(state.x,state.z,oldY,solids);if(state.y<=floor){if(!state.grounded)state.landedAt=state.time;state.y=floor;state.vy=0;state.grounded=true;if(state.slideQueued&&state.slideCooldown<=0){state.slideQueued=false;const current=Math.hypot(state.vx,state.vz);if(current>=2){const boosted=Math.min(current*MOVE.slideBoost,horizontalCap(input));state.vx=state.vx/current*boosted;state.vz=state.vz/current*boosted;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown}}}else state.grounded=false;
  return state;
 }
 
@@ -53,9 +58,10 @@ export function colliderLocal(s,x,z){const a=s.yaw||0,c=Math.cos(a),n=Math.sin(a
 export function colliderContains(s,x,z,r=0){const p=colliderLocal(s,x,z);return Math.abs(p.x)<s.w/2+r-1e-7&&Math.abs(p.z)<s.d/2+r-1e-7;}
 export function colliderHeight(s,x,z){if(s.kind!=='ramp')return s.top;const p=colliderLocal(s,x,z),dir=s.dir||'N';let t=dir==='S'?(p.z/s.d+.5):dir==='E'?(p.x/s.w+.5):dir==='W'?(.5-p.x/s.w):(.5-p.z/s.d);return s.bottom+(s.top-s.bottom)*movementClamp(t,0,1);}
 export function rampWalkable(s){return s.kind!=='ramp'||Math.atan2(s.top-s.bottom,['E','W'].includes(s.dir)?s.w:s.d)<=40*Math.PI/180+1e-7;}
-export function collisionFloor(x,z,y,solids,r=.27,step=.001){let floor=0;for(const s of solids){if(!colliderContains(s,x,z,r)||!rampWalkable(s))continue;const top=colliderHeight(s,x,z);if(top<=y+step)floor=Math.max(floor,top);}return floor;}
-export function collisionBlocked(x,z,r,y,h,solids){return solids.some(s=>colliderContains(s,x,z,r)&&s.bottom<y+h-1e-6&&(rampWalkable(s)?colliderHeight(s,x,z):s.top)>y+.001);}
+export function collisionFloor(x,z,y,solids,r=.27,step=.001){let floor=0;for(const s of solids){if(s.kind==='ladder'||!colliderContains(s,x,z,r)||!rampWalkable(s))continue;const top=colliderHeight(s,x,z);if(top<=y+step)floor=Math.max(floor,top);}return floor;}
+export function collisionBlocked(x,z,r,y,h,solids){return solids.some(s=>s.kind!=='ladder'&&colliderContains(s,x,z,r)&&s.bottom<y+h-1e-6&&(rampWalkable(s)?colliderHeight(s,x,z):s.top)>y+.001);}
 function moveGeometryV3(state,input,dt,solids){
+ if(solids.some(s=>s.kind==='ladder'))solids=solids.filter(s=>s.kind!=='ladder');
  const height=state.slide>0?1.2:1.8,r=.33,steps=Math.max(1,Math.ceil(Math.hypot(state.vx,state.vz)*dt/.15));
  const attempt=(dx,dz)=>{
   let x=state.x+dx,z=state.z+dz,y=state.y;
@@ -81,7 +87,22 @@ function moveGeometryV3(state,input,dt,solids){
  if(state.vy>0)for(const s of solids){if(s.kind==='ramp'||!colliderContains(s,state.x,state.z,r))continue;if(oldY+height<=s.bottom+.001&&state.y+height>s.bottom){state.y=s.bottom-height;state.vy=0;}}
  const floor=collisionFloor(state.x,state.z,oldY,solids,.33,state.grounded?.55:.001);
  if(state.y<=floor){if(!state.grounded)state.landedAt=state.time;state.y=floor;state.vy=0;state.grounded=true;
-  if(state.slideQueued&&state.slideCooldown<=0){state.slideQueued=false;const speed=Math.hypot(state.vx,state.vz);if(speed>=2){const boosted=Math.min(speed*MOVE.slideBoost,(Number(input.speed)||8.2)*MOVE.softCap);state.vx*=boosted/speed;state.vz*=boosted/speed;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown;}}
+  if(state.slideQueued&&state.slideCooldown<=0){state.slideQueued=false;const speed=Math.hypot(state.vx,state.vz);if(speed>=2){const boosted=Math.min(speed*MOVE.slideBoost,horizontalCap(input));state.vx*=boosted/speed;state.vz*=boosted/speed;state.slide=MOVE.slideMin;state.slideCooldown=MOVE.slideCooldown;}}
  }else state.grounded=false;
+ return state;
+}
+
+function moveOnLadder(state,input,dt,ladders,solids){
+ if(state.time<(state.ladderDetachUntil||0))return null;
+ const ladder=ladders.find(l=>colliderContains(l,state.x,state.z,.33)&&state.y+1.8>l.bottom&&state.y<l.top+.1);
+ if(!ladder)return null;
+ if(input.jump){state.vy=MOVE.jumpVel;state.grounded=false;state.ladderDetachUntil=state.time+.5;return null;}
+ if(ladder.exitX)state.x=ladder.x-ladder.exitX*.36;if(ladder.exitZ)state.z=ladder.z-ladder.exitZ*.36;
+ const f=movementClamp(Number(input.fwd)||0,-1,1),y=movementClamp(state.y+f*3.5*dt,ladder.bottom,ladder.top);
+ // Stop at ceilings; an adjacent platform is stepped onto only at the ladder top.
+ if(y>state.y&&solids.some(s=>colliderContains(s,state.x,state.z,.2)&&s.bottom>=state.y+1.8-.001&&s.bottom<y+1.8))return {...state,vy:0,vx:0,vz:0};
+ state.y=y;state.vx=state.vy=state.vz=0;state.grounded=false;state.slide=0;
+ if(f>0&&y>=ladder.top-.001){const yaw=Number(input.yaw)||0;for(const distance of [.35,.55,.8,1.1]){const x=state.x-Math.sin(yaw)*distance,z=state.z-Math.cos(yaw)*distance,floor=collisionFloor(x,z,y,solids,.05,.55);if(floor>=ladder.bottom&&floor>=y-1.3&&!collisionBlocked(x,z,.33,Math.max(y,floor),1.8,solids)){state.x=x;state.z=z;state.y=Math.max(y,floor);state.ladderDetachUntil=state.time+.35;break}}}
+ if(f<0&&y===ladder.bottom){state.ladderDetachUntil=state.time+.25;state.grounded=true;}
  return state;
 }

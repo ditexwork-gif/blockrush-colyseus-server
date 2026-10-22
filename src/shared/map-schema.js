@@ -1,10 +1,14 @@
-const environmentStorage=undefined; // Server never reads browser storage.
+import {validateRifts,RIFT_COLORS} from './rifts.js';
+import {PREFAB_IDS,expandPrefab} from './mapkit-colliders.js';
+const environmentStorage=undefined; // No browser storage on server.
 import {mapColliders} from './map-geometry.js';
 import {collisionBlocked} from './movement.js';
 export const MAP_VERSION = 3;
 export const MAP_STORAGE_KEY = 'blockrift-custom-map-v1';
 
 export const TYPES = Object.freeze({
+  rift: {label:'Rift',width:1.8,depth:.5,height:2.6,color:'#ff6a1a'},
+  prefab: {label:'Map Kit',width:8,depth:8,height:8,color:'#9aafa4'},
   select: { label: 'Select', color: '#dcff59' },
   wall: { label: 'Wall', width: 8, depth: 1, height: 3, color: '#7f9293' },
   cover: { label: 'Low cover', width: 4, depth: 1.2, height: 1.25, color: '#c3b388' },
@@ -79,6 +83,7 @@ export function sanitizeMap(value) {
   const source = [...(Array.isArray(value.objects) ? value.objects : []), ...(Array.isArray(value.spawns) ? value.spawns.map(item => ({...item, type:'spawn'})) : [])].slice(0, 600);
   for (const raw of source) {
     if (!raw || !Object.hasOwn(TYPES,raw.type) || raw.type === 'select') continue;
+    if(raw.type==='prefab'&&!PREFAB_IDS.includes(raw.prefab))throw new Error('Unknown Map Kit prefab.');
     const defaults = TYPES[raw.type], spawn = raw.type === 'spawn';
     map.objects.push({
       id: String(raw.id || id()).replace(/[^a-z0-9_-]/gi, '').slice(0, 64) || id(),
@@ -89,7 +94,9 @@ export function sanitizeMap(value) {
       width: spawn ? defaults.width : clamp(number(raw.width ?? raw.w, defaults.width), .5, 60),
       depth: spawn ? defaults.depth : clamp(number(raw.depth ?? raw.d, defaults.depth), .5, 60),
       height: spawn ? 0 : clamp(number(raw.height ?? raw.h, defaults.height), .2, 18),
-      rotation: angle(number(raw.rotation ?? raw.rot)),
+      rotation: ['prefab','rift'].includes(raw.type)?angle(Math.round(number(raw.rotation ?? raw.rot)/90)*90):angle(number(raw.rotation ?? raw.rot)),
+      ...(raw.type==='rift'?{pair:safeId(raw.pair)||'r1',end:raw.end==='B'?'B':'A',width:1.8,depth:.5,height:2.6}:{}),
+      ...(raw.type==='prefab'?{prefab:raw.prefab,scale:clamp(number(raw.scale,1),.25,4)}:{}),
       ...(raw.painted===true?{painted:true}:{}),
       name: text(raw.name || '',64), locked: raw.locked===true, hidden: raw.hidden===true,
       ...(map.groups.some(g=>g.id===raw.group)?{group:raw.group}:{}),
@@ -100,6 +107,8 @@ export function sanitizeMap(value) {
       color: hex(raw.color, defaults.color)
     });
   }
+  for(const o of map.objects)if(o.type==='prefab'){const parts=expandPrefab({...o,x:0,y:0,z:0,rotation:0});o.width=2*Math.max(...parts.map(c=>Math.abs(c.x)+c.width/2));o.depth=2*Math.max(...parts.map(c=>Math.abs(c.z)+c.depth/2));o.height=Math.max(...parts.map(c=>c.y+c.height));}
+  const riftPairs=[...new Set(map.objects.filter(o=>o.type==='rift').map(o=>o.pair))];if(riftPairs.length>3||map.objects.filter(o=>o.type==='rift').length>6)throw Error('Maximum three rift pairs (six ends).');for(const pair of riftPairs){const ends=map.objects.filter(o=>o.type==='rift'&&o.pair===pair);for(const r of ends)r.color=ends[0].color;}
   if(value.paintLayer&&typeof value.paintLayer==='object'){const l=value.paintLayer;map.paintLayer={cell:[1,2,4,8].includes(l.cell)?l.cell:map.snap*2,height:clamp(number(l.height,8),.2,18),color:hex(l.color,'#a79a80'),rle:(Array.isArray(l.rle)?l.rle:[]).slice(0,32400).filter(r=>Array.isArray(r)&&r.length===2&&r.every(Number.isInteger)&&r[0]>=0&&r[0]<32400&&r[1]>0&&r[1]<=32400).map(r=>[r[0],r[1]])};}
   const ids=new Set();for(const item of map.objects){if(ids.has(item.id))item.id=id();ids.add(item.id)}
   return map;
@@ -118,6 +127,7 @@ export function validateMap(value) {
   if (spawns.length > 16) warnings.push('More than 16 spawn points may make respawns difficult to predict.');
   if (solids.length < 4) warnings.push('The arena has very little cover. Add walls or props before combat testing.');
   if (solids.length > 450) warnings.push('This map may be heavy on lower-end devices.');
+  warnings.push(...validateRifts(map,mapColliders(map)));
   return { map, errors: [...new Set(errors)], warnings };
 }
 

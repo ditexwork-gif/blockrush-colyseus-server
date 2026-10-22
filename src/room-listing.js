@@ -4,8 +4,8 @@ export function sanitizeRoomName(value){return typeof value==='string'?Array.fro
 export const defaultRoomName=name=>sanitizeDisplayName(name)+"'s match";
 export function publicRoomListing(room,now=Date.now()){
  const m=room.metadata;
- if(room.private===true||room.unlisted===true||m?.public!==true||m?.inviteOnly===true)return null;
- const result={roomId:room.roomId,clients:room.clients,maxClients:room.maxClients,locked:room.locked,map:m.map,mapName:m.mapName,mapHash:m.mapHash,mode:m.mode,phase:m.phase,name:sanitizeRoomName(m.name)};
+ if(m?.matchHealthy===false||room.private===true||room.unlisted===true||m?.public!==true||m?.inviteOnly===true)return null;
+ const result={roomId:room.roomId,clients:Number.isInteger(m.connectedHumans)?m.connectedHumans:room.clients,maxClients:room.maxClients,locked:room.locked,map:m.map,mapName:m.mapName,mapHash:m.mapHash,mode:m.mode,phase:m.phase,name:sanitizeRoomName(m.name)};
  if(Array.isArray(m.connectedPlayers))result.connectedPlayers=m.connectedPlayers.slice(0,room.maxClients).map(sanitizeDisplayName);
  if(Number.isFinite(m.roundTimeSeconds))result.roundTimeSeconds=m.roundTimeSeconds;
  if(m.phase==='playing'&&Number.isFinite(m.endsAt))result.timeRemainingSeconds=Math.max(0,Math.ceil((m.endsAt-now)/1000));

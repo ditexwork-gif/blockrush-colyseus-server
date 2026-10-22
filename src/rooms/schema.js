@@ -1,6 +1,7 @@
 import { schema, t } from "@colyseus/schema";
 
 export const PlayerNetState = schema({
+  movementTimeTick:t.uint32(0),ladderDetachTick:t.uint32(0),riftSerial:t.uint32(0),riftCooldownTick:t.uint32(0),
   name: t.string(""), bot: t.boolean(false),
   x: t.int16(0), y: t.int16(0), z: t.int16(0),
   vx: t.int16(0), vy: t.int16(0), vz: t.int16(0),
@@ -19,7 +20,7 @@ export const NetEvent = schema({
 }, "NetEvent");
 
 export const ArenaState = schema({
-  mapHash:t.string(""), code: t.string(""), map: t.string("foundry"), mode: t.string("ffa"), hostId: t.string(""),
+  movementVersion:t.uint8(2),mapHash:t.string(""), code: t.string(""), map: t.string("foundry"), mode: t.string("ffa"), hostId: t.string(""),
   phase: t.uint8(0), tick: t.uint32(0), round: t.uint16(0), startsIn: t.uint8(0), endsAtTick: t.uint32(0), serverTime: t.float64(0),
   players: t.map(PlayerNetState), events: t.array(NetEvent)
 }, "ArenaState");

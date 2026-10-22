@@ -1,7 +1,10 @@
+import {expandPrefab} from './mapkit-colliders.js';
 import {groundParts} from './map-ground.js';
 // Shared, dependency-free shape expansion. Local +Y rotation matches Three.js.
 export function objectCollider(item){const angle=item.rotation*Math.PI/180,quarter=Math.abs(item.rotation/90-Math.round(item.rotation/90))<1e-8,swap=Math.round(item.rotation/90)%2!==0;return {id:item.id,x:item.x,z:item.z,w:quarter&&swap?item.depth:item.width,d:quarter&&swap?item.width:item.depth,bottom:item.y,top:item.y+item.height,...(!quarter?{yaw:angle}:{})};}
 export function expandObject(o){
+ if(o.type==='rift'){const a=(o.rotation||0)*Math.PI/180,c=Math.cos(a),s=Math.sin(a);return [[-.85,0,.1,.3,0,2.6],[.85,0,.1,.3,0,2.6],[0,0,1.6,.3,2.4,2.6],[0,0,1.6,.1,0,2.4]].map(([x,z,w,d,bottom,top],i)=>({id:o.id+'-'+i,type:'rift',x:o.x+c*x+s*z,z:o.z-s*x+c*z,w,d,bottom:o.y+bottom,top:o.y+top,yaw:a,color:o.color,...(i===3?{riftSurface:o.id}:{} )}));}
+ if(o.type==='prefab')return expandPrefab(o).map(c=>({id:c.id,fromPrefab:o.id,type:c.type,kind:c.type==='ladder'?'ladder':c.type==='ramp'?'ramp':undefined,x:c.x,z:c.z,w:c.width,d:c.depth,bottom:c.y,top:c.y+c.height,dir:c.dir,exitX:c.exitX,exitZ:c.exitZ,shoot:c.shoot,color:o.color,...(c.rotation%90?{yaw:(c.rotation%90)*Math.PI/180}:{})}));
  if(o.type==='spawn'||o.type==='zone')return [];
  const a=o.rotation*Math.PI/180,c=Math.cos(a),s=Math.sin(a),out=[];
  const box=(x,z,w,d,bottom,top)=>out.push({id:o.id,x:o.x+c*x+s*z,z:o.z-s*x+c*z,w,d,bottom:o.y+bottom,top:o.y+top,yaw:a,color:o.color,type:o.type});

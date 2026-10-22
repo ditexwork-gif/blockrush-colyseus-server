@@ -1,5 +1,6 @@
 // Intersect the convex box/ramp in its authored local coordinates.
 export function mapRayDistance(solid,origin,direction,maxDistance=220){
+ if(solid.shoot===false||solid.kind==='ladder')return Infinity;
  const yaw=solid.yaw||0,c=Math.cos(yaw),s=Math.sin(yaw),dx=origin.x-solid.x,dz=origin.z-solid.z;
  const p={x:c*dx-s*dz,y:origin.y,z:s*dx+c*dz},v={x:c*direction.x-s*direction.z,y:direction.y,z:s*direction.x+c*direction.z};
  let near=0,far=maxDistance;

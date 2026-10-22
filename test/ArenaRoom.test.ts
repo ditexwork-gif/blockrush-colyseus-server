@@ -147,9 +147,9 @@ describe("BLOCKRIFT realtime room", () => {
         player.pendingInputs=[{seq,dtTicks:1,fwd:1,right:0,yaw:0,pitch:0,weapon:0,aiming:true,adsMoveMult:99}];
         room.stepPlayer(player,Date.now());
       }
-      assert.ok(Math.abs(Math.hypot(player.pose.vx,player.pose.vz)-speed*mult)<1e-8,`${id} ignores fabricated ADS speed`);
+      assert.ok(Math.abs(Math.hypot(player.pose.vx,player.pose.vz)-speed*1.38*mult)<1e-8,`${id} ignores fabricated ADS speed`);
       player.pendingInputs=[];room.stepPlayer(player,Date.now());
-      assert.ok(Math.abs(Math.hypot(player.pose.vx,player.pose.vz)-speed*mult)<1e-8,`${id} holds authoritative ADS speed on a packet gap`);
+      assert.ok(Math.abs(Math.hypot(player.pose.vx,player.pose.vz)-speed*1.38*mult)<1e-8,`${id} holds authoritative ADS speed on a packet gap`);
     }
   });
 
@@ -365,7 +365,7 @@ describe("BLOCKRIFT realtime room", () => {
       const honest = run(1), cheating = run(3);
       assert.ok(honest > 8, 'fixture must actually move through open space');
       assert.ok(cheating < honest * 1.35, `cadence=${cadence}: dtTicks=3 travelled ${cheating} m against ${honest} m`);
-      assert.ok(cheating <= byId['AR-30'].speed * (ticks + reserve) / 60 + 1e-8, 'movement cannot exceed elapsed ticks plus initial catch-up reserve');
+      assert.ok(cheating <= byId['AR-30'].speed * 1.38 * (ticks + reserve) / 60 + 1e-8, 'movement cannot exceed elapsed ticks plus initial catch-up reserve');
     }
   });
 
